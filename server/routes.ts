@@ -12,6 +12,7 @@ import { handleBotUpdate, initBot, sendChargedCardNotification } from "./service
 import { setWss } from "./services/wsManager";
 import { searchTracks as spotifySearch, getAccessTokenForClient, playTrack as spotifyPlayTrack } from "./services/spotify";
 import { generateCaptcha, verifyCaptcha } from "./captcha";
+import { checkProxyValidity } from "./proxy-checker";
 
 const JWT_SECRET = process.env.SESSION_SECRET || 'nexus-checker-secret-key-2025';
 
@@ -598,10 +599,16 @@ export async function registerRoutes(
       console.log('[API] Result:', result);
       
       res.json({ 
-        isValid: result.isValid,
-        latency: result.latency,
+        valid: result.isValid,
+        proxy,
+        speed: result.latency,
+        responseTime: result.latency,
+        type: result.type,
+        status: result.isValid ? 'ok' : 'error',
         error: result.error,
-        type: result.type
+        ip1: result.ip1,
+        isRotating: false,
+        hasAuth: proxy.split(':').length >= 4
       });
     } catch (e: any) {
       console.error('[API] Error:', e);
@@ -705,10 +712,27 @@ export async function registerRoutes(
     try {
       const { cards, siteId } = req.body;
       const cardList = cards;
-      const targetUrl = 'https://shopify-checkout.com'; // Default checkout URL
-      const proxyList = ''; // Empty by default, user can add proxies in settings
+
+      // Get the real site URL from the selected site (or the active site)
+      let targetUrl = '';
+      if (siteId) {
+        const site = await storage.getSiteById(siteId);
+        targetUrl = site?.url || '';
+      }
+      if (!targetUrl) {
+        const activeSite = await storage.getActiveSite(req.user!.id);
+        targetUrl = activeSite?.url || '';
+      }
+
+      // Get the user's saved proxies
+      const userProxies = await storage.getUserProxies(req.user!.id);
+      const proxyList = userProxies
+        .filter(p => p.isValid !== false)
+        .map(p => p.proxy)
+        .join('\n');
+
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-      
+
       const session = await storage.createCheckSession({
         sessionId,
         userId: req.user!.id,
@@ -716,7 +740,7 @@ export async function registerRoutes(
         totalCards: cardList?.length || 0,
       });
 
-      processQueue(cardList || [], targetUrl, proxyList || '', req.user!.id, req.user!.telegramId, sessionId, siteId).catch(console.error);
+      processQueue(cardList || [], targetUrl, proxyList, req.user!.id, req.user!.telegramId, sessionId, siteId).catch(console.error);
 
       res.json(session);
     } catch (e: any) {
@@ -739,6 +763,23 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/check/status', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const job = getUserJob(req.user!.id);
+      const results = await storage.getResults(100, req.user!.id);
+      res.json({
+        active: job.isRunning,
+        processed: job.processed,
+        total: job.total,
+        charged: job.charged,
+        rejected: job.rejected,
+        results,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -772,6 +813,170 @@ export async function registerRoutes(
     try {
       await storage.clearResults(req.user!.id);
       res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Leaderboard
+  app.get('/api/leaderboard', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const leaderboard = await storage.getLeaderboard(50);
+      res.json(leaderboard);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Online users
+  app.get('/api/online-users', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const online = await getOnlineUsers();
+      res.json(online);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Notification settings
+  app.get('/api/notifications/settings', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const settings = await storage.getNotificationSettings(req.user!.id);
+      res.json(settings || {
+        userId: req.user!.id,
+        approvedAlerts: true,
+        dailySummary: false,
+        streakReminder: true,
+        updatedAt: new Date(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/notifications/settings', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { approvedAlerts, dailySummary, streakReminder } = req.body;
+      const settings = await storage.updateNotificationSettings(req.user!.id, {
+        approvedAlerts,
+        dailySummary,
+        streakReminder,
+      });
+      res.json(settings);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Daily Spin
+  app.get('/api/spin/status', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const canSpin = await storage.canSpinToday(req.user!.id);
+      const lastSpin = await storage.getLastSpin(req.user!.id);
+      res.json({ canSpin, lastSpin: lastSpin || null });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/spin', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const canSpin = await storage.canSpinToday(req.user!.id);
+      if (!canSpin) {
+        return res.status(400).json({ error: 'Already spun today' });
+      }
+      const prizes = [20, 30, 40, 60, 85, 110];
+      const creditsWon = prizes[Math.floor(Math.random() * prizes.length)];
+      const spin = await storage.recordSpin(req.user!.id, creditsWon);
+      await storage.updateUserCredits(req.user!.telegramId, creditsWon);
+      res.json(spin);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Daily Streak
+  app.get('/api/streak/status', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const streak = await storage.getStreak(req.user!.id) as any;
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      let canClaim = true;
+      if (streak?.lastClaimDate) {
+        const last = new Date(streak.lastClaimDate);
+        const lastDay = new Date(last.getFullYear(), last.getMonth(), last.getDate());
+        canClaim = lastDay.getTime() !== today.getTime();
+      }
+      res.json({
+        currentStreak: streak?.currentStreak || 0,
+        longestStreak: streak?.longestStreak || 0,
+        lastClaimDate: streak?.lastClaimDate,
+        totalClaimed: streak?.totalClaimed || 0,
+        canClaim,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/streak/claim', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const result = await storage.claimStreak(req.user!.id);
+      if (result.canClaim && result.reward > 0) {
+        await storage.updateUserCredits(req.user!.telegramId, result.reward);
+      }
+      res.json({
+        currentStreak: result.streak.currentStreak,
+        longestStreak: result.streak.longestStreak,
+        lastClaimDate: result.streak.lastClaimDate,
+        totalClaimed: result.streak.totalClaimed,
+        reward: result.reward,
+        canClaim: result.canClaim,
+      });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Referrals
+  app.get('/api/referral/code', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const code = await storage.generateReferralCode(req.user!.id);
+      res.json({ code });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/referral/stats', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const count = await storage.getReferralCount(req.user!.id);
+      const referrals = await storage.getReferralsByUser(req.user!.id);
+      res.json({ count, totalCredits: count * 100, referrals });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/referral/apply', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { code } = req.body;
+      const refUser = await storage.getUserByReferralCode(code);
+      if (!refUser) {
+        return res.status(400).json({ error: 'Invalid referral code' });
+      }
+      if (refUser.id === req.user!.id) {
+        return res.status(400).json({ error: 'You cannot use your own referral code' });
+      }
+      const current = await storage.getUserByTelegramId(req.user!.telegramId);
+      if (current?.referredBy) {
+        return res.status(400).json({ error: 'You already used a referral code' });
+      }
+      await storage.createReferral(refUser.id, current!.id, refUser.referralCode!);
+      await storage.updateUser(req.user!.telegramId, { referredBy: refUser.id });
+      await storage.updateUserCredits(req.user!.telegramId, 50);
+      await storage.updateUserCredits(refUser.telegramId, 100);
+      res.json({ creditsEarned: 50 });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }

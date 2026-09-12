@@ -12,6 +12,7 @@ interface ProxyCheckResult {
   error?: string;
   type?: string;
   details?: string;
+  ip1?: string;
 }
 
 /**
@@ -142,11 +143,19 @@ export async function checkProxyValidity(
           
           res.on('end', () => {
             if (res.statusCode === 200) {
-              console.log(`[PROXY] ✅ Valid: ${proxyStr} (${latency}ms)`);
+              let ip1: string | undefined;
+              try {
+                const parsed = JSON.parse(data);
+                ip1 = parsed.origin;
+              } catch (e) {
+                ip1 = data.trim() || undefined;
+              }
+              console.log(`[PROXY] ✅ Valid: ${proxyStr} (${latency}ms) ip=${ip1}`);
               resolve({ 
                 isValid: true, 
                 latency,
-                type: 'http'
+                type: 'http',
+                ip1
               });
             } else {
               console.log(`[PROXY] ❌ Invalid HTTP ${res.statusCode}`);

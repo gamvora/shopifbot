@@ -45,6 +45,7 @@ interface Site {
   url: string;
   productPrice: string | null;
   isActive: boolean;
+  isGlobal?: boolean;
 }
 
 interface CheckResult {
@@ -109,6 +110,8 @@ export default function Home() {
       const activeIndex = sites.findIndex(s => s.isActive);
       if (activeIndex >= 0) {
         setSelectedSiteIndex(activeIndex);
+      } else {
+        setSelectedSiteIndex(0);
       }
     }
   }, [sites]);
@@ -702,6 +705,11 @@ export default function Home() {
                     <span className="font-semibold text-sm truncate" data-testid="selected-site-name">
                       {selectedSite?.name || 'Select'}
                     </span>
+                    {selectedSite?.isGlobal && (
+                      <span className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400">
+                        Global
+                      </span>
+                    )}
                     {selectedSite?.productPrice && (
                       <span className="text-xs px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-mono">
                         {selectedSite.productPrice}

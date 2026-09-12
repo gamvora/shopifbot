@@ -3,33 +3,79 @@ import { Volume2, VolumeX } from 'lucide-react';
 
 const LOFI_STREAM = 'https://stream.zeno.fm/0r0xa792kwzuv';
 
+const GESTURE_EVENTS = ['click', 'touchstart', 'pointerdown', 'keydown'] as const;
+
+function ensureMusicPlaying(audio: HTMLAudioElement) {
+  let cleanedUp = false;
+  const listeners: Array<[string, EventListener]> = [];
+
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    for (const [event, fn] of listeners) {
+      document.removeEventListener(event, fn);
+    }
+    clearInterval(interval);
+    window.removeEventListener('pagehide', cleanup);
+  };
+
+  const tryPlay = () => {
+    if (cleanedUp || window.backgroundMusicMuted) return;
+    if (!audio.paused) {
+      cleanup();
+      return;
+    }
+    audio.play().catch(() => {});
+  };
+
+  // Retry periodically in case autoplay becomes allowed (e.g. history-based media engagement),
+  // and stop all retry work as soon as the music is playing.
+  const interval = window.setInterval(() => {
+    if (cleanedUp) return;
+    if (window.backgroundMusicMuted) {
+      cleanup();
+      return;
+    }
+    if (!audio.paused) {
+      cleanup();
+      return;
+    }
+    if (document.visibilityState === 'visible') {
+      audio.play().catch(() => {});
+    }
+  }, 3000);
+
+  // Try immediately on load (works when autoplay is allowed)
+  tryPlay();
+
+  // Fall back to any user gesture anywhere on the page
+  if (!cleanedUp && audio.paused) {
+    for (const event of GESTURE_EVENTS) {
+      const fn = tryPlay as EventListener;
+      listeners.push([event, fn]);
+      document.addEventListener(event, fn);
+    }
+    window.addEventListener('pagehide', cleanup);
+  }
+}
+
 // Initialize audio globally once
 export function initBackgroundMusic() {
-  if (!window.backgroundAudio) {
-    const audio = new Audio();
+  const savedMuted = localStorage.getItem('backgroundMusicMuted') === 'true';
+  window.backgroundMusicMuted = savedMuted;
+
+  let audio = window.backgroundAudio;
+  if (!audio) {
+    audio = new Audio();
     audio.loop = true;
     audio.volume = 0.08;
-    audio.crossOrigin = 'anonymous';
+    audio.preload = 'auto';
     audio.src = LOFI_STREAM;
     window.backgroundAudio = audio;
-    
-    const savedMuted = localStorage.getItem('backgroundMusicMuted') === 'true';
-    window.backgroundMusicMuted = savedMuted;
-    
-    if (!savedMuted) {
-      const tryPlay = () => {
-        if (window.backgroundAudio && !window.backgroundMusicMuted) {
-          window.backgroundAudio.play().catch(() => {});
-        }
-        document.removeEventListener('click', tryPlay);
-        document.removeEventListener('touchstart', tryPlay);
-      };
-      
-      window.backgroundAudio.play().catch(() => {
-        document.addEventListener('click', tryPlay, { once: true });
-        document.addEventListener('touchstart', tryPlay, { once: true });
-      });
-    }
+  }
+
+  if (!savedMuted) {
+    ensureMusicPlaying(audio);
   }
 }
 

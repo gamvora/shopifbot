@@ -521,6 +521,136 @@ export async function registerRoutes(
     res.json(sites);
   });
 
+  const normalizeSiteUrl = (raw: string): { url: string; host: string } | { error: string } => {
+    let input = (raw || '').trim();
+    if (!input) return { error: 'URL is required' };
+    if (!/^https?:\/\//i.test(input)) {
+      input = 'https://' + input;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(input);
+    } catch {
+      return { error: 'Invalid URL' };
+    }
+    if (!parsed.hostname || !parsed.hostname.includes('.')) {
+      return { error: 'Invalid domain' };
+    }
+    return { url: parsed.origin, host: parsed.hostname };
+  };
+
+  const fetchShopDetails = async (origin: string): Promise<{ ok: true; title: string; price: string | null } | { ok: false; error: string }> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const res = await fetch(`${origin}/products.json`, { signal: controller.signal });
+      if (!res.ok) {
+        return { ok: false, error: `Store returned HTTP ${res.status}` };
+      }
+      const data: any = await res.json();
+      const products: any[] = Array.isArray(data?.products) ? data.products : [];
+      if (products.length === 0) {
+        return { ok: false, error: 'No products found on the store' };
+      }
+      let title: string = products[0]?.title || origin;
+      let price: string | null = null;
+      for (const product of products.slice(0, 20)) {
+        const variants: any[] = Array.isArray(product?.variants) ? product.variants : [];
+        for (const variant of variants) {
+          const value = parseFloat(variant?.price);
+          if (!isNaN(value) && value > 0 && (price === null || value < parseFloat(price))) {
+            price = String(variant.price);
+            if (product?.title) title = product.title;
+          }
+        }
+      }
+      return { ok: true, title, price };
+    } catch (e: any) {
+      if (e.name === 'AbortError' || e.name === 'TimeoutError') {
+        return { ok: false, error: 'Store request timed out' };
+      }
+      return { ok: false, error: e?.message || 'Failed to reach the store' };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  // Admin: test a site (reaches the gateway with a test card) before adding it as a global site
+  app.post('/api/admin/sites/verify', authMiddleware, async (req: AuthRequest, res) => {
+    if (!req.user!.isAdmin) {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+    const started = Date.now();
+    const normalized = normalizeSiteUrl(req.body?.url);
+    if ('error' in normalized) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    const origin = normalized.url;
+
+    const shop = await fetchShopDetails(origin);
+
+    const logs: string[] = [];
+    const testCard = '4111111111111111|12|29|123';
+    const gateway = await checkCardWithAPI(testCard, origin, '', (msg) => logs.push(msg));
+
+    const gatewayReplied = gateway.status !== 'error' && !!gateway.message && !gateway.message.includes('Timeout') && !gateway.message.includes('[STOPPED]');
+
+    res.json({
+      ok: shop.ok && gatewayReplied,
+      url: origin,
+      siteWorks: shop.ok,
+      productTitle: shop.ok ? shop.title : null,
+      productPrice: shop.ok ? shop.price : null,
+      siteError: shop.ok ? null : shop.error,
+      gateway: gateway.gateway ?? null,
+      gatewayReply: gatewayReplied ? gateway.message : null,
+      gatewayError: gatewayReplied ? null : gateway.message,
+      gatewayStatus: gateway.status,
+      gatewayPrice: gateway.price ?? null,
+      elapsed: Date.now() - started,
+      logs: logs.slice(0, 30),
+    });
+  });
+
+  // Admin: add a global (shared) site that every user can see
+  app.post('/api/admin/sites', authMiddleware, async (req: AuthRequest, res) => {
+    if (!req.user!.isAdmin) {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+    try {
+      const { url, name, productPrice } = req.body;
+      const normalized = normalizeSiteUrl(url);
+      if ('error' in normalized) {
+        return res.status(400).json({ error: normalized.error });
+      }
+      const displayName = (name || '').trim() || normalized.host;
+      const site = await storage.addSite({
+        userId: req.user!.id,
+        name: displayName,
+        url: normalized.url,
+        productPrice: productPrice ?? null,
+        isActive: false,
+        isGlobal: true,
+      });
+      res.json(site);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  const assertSiteEditable = async (req: AuthRequest, id: number) => {
+    const site = await storage.getSiteById(id);
+    if (!site) {
+      return undefined;
+    }
+    if (site.isGlobal) {
+      return req.user!.isAdmin ? site : null;
+    }
+    const userSites = await storage.getUserSites(req.user!.id);
+    const ownsSite = userSites.some((s) => s.id === id && s.userId === req.user!.id);
+    return ownsSite ? site : null;
+  };
+
   app.post(api.sites.add.path, authMiddleware, async (req: AuthRequest, res) => {
     try {
       const { name, url } = req.body;
@@ -539,9 +669,11 @@ export async function registerRoutes(
   app.put('/api/sites/:id', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const id = parseInt(req.params.id as string);
-      const userSites = await storage.getUserSites(req.user!.id);
-      const ownsSite = userSites.some(s => s.id === id);
-      if (!ownsSite) {
+      const target = await assertSiteEditable(req, id);
+      if (target === undefined) {
+        return res.status(404).json({ error: 'Site not found' });
+      }
+      if (target === null) {
         return res.status(403).json({ error: 'Access denied' });
       }
       const { name, url } = req.body;
@@ -555,9 +687,11 @@ export async function registerRoutes(
   app.delete('/api/sites/:id', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const id = parseInt(req.params.id as string);
-      const userSites = await storage.getUserSites(req.user!.id);
-      const ownsSite = userSites.some(s => s.id === id);
-      if (!ownsSite) {
+      const target = await assertSiteEditable(req, id);
+      if (target === undefined) {
+        return res.status(404).json({ error: 'Site not found' });
+      }
+      if (target === null) {
         return res.status(403).json({ error: 'Access denied' });
       }
       await storage.deleteSite(id);
@@ -570,9 +704,11 @@ export async function registerRoutes(
   app.post('/api/sites/:id/activate', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const siteId = parseInt(req.params.id as string);
-      const userSites = await storage.getUserSites(req.user!.id);
-      const ownsSite = userSites.some(s => s.id === siteId);
-      if (!ownsSite) {
+      const target = await assertSiteEditable(req, siteId);
+      if (target === undefined) {
+        return res.status(404).json({ error: 'Site not found' });
+      }
+      if (target === null) {
         return res.status(403).json({ error: 'Access denied' });
       }
       await storage.setActiveSite(req.user!.id, siteId);

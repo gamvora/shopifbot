@@ -27,6 +27,7 @@ export interface Site {
   url: string;
   productPrice?: string;
   isActive: boolean;
+  isGlobal: boolean;
   createdAt: Date;
 }
 
@@ -138,6 +139,7 @@ export const insertSiteSchema = z.object({
   url: z.string(),
   productPrice: z.string().optional(),
   isActive: z.boolean().optional(),
+  isGlobal: z.boolean().optional(),
 });
 
 export const insertProxySchema = z.object({

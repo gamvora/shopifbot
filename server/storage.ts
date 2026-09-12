@@ -229,13 +229,21 @@ export class FileStorage implements IStorage {
   async getUserSites(userId: number): Promise<Site[]> {
     const sites = readJSON<Site>("sites");
     return sites
-      .filter((s) => s.userId === userId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      .filter((s) => s.userId === userId || s.isGlobal)
+      .sort((a, b) => {
+        const globalDiff = (b.isGlobal ? 1 : 0) - (a.isGlobal ? 1 : 0);
+        if (globalDiff !== 0) return globalDiff;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
   }
 
   async getActiveSite(userId: number): Promise<Site | undefined> {
     const sites = readJSON<Site>("sites");
-    return sites.find((s) => s.userId === userId && s.isActive);
+    const personal = sites.find((s) => s.userId === userId && s.isActive);
+    if (personal) return personal;
+    return sites
+      .filter((s) => s.isGlobal)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
   }
 
   async getSiteById(id: number): Promise<Site | undefined> {
@@ -252,6 +260,7 @@ export class FileStorage implements IStorage {
       url: site.url,
       productPrice: site.productPrice,
       isActive: site.isActive || false,
+      isGlobal: site.isGlobal || false,
       createdAt: new Date(),
     };
     sites.push(newSite);
@@ -706,6 +715,7 @@ function toSite(r: any): Site {
     url: r.url,
     productPrice: r.product_price ?? undefined,
     isActive: r.is_active,
+    isGlobal: !!r.is_global,
     createdAt: r.created_at,
   };
 }
@@ -853,8 +863,10 @@ export class PostgresStorage implements IStorage {
         url TEXT NOT NULL,
         product_price TEXT,
         is_active BOOLEAN NOT NULL DEFAULT false,
+        is_global BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      ALTER TABLE sites ADD COLUMN IF NOT EXISTS is_global BOOLEAN NOT NULL DEFAULT false;
       CREATE TABLE IF NOT EXISTS proxies (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL,
@@ -1032,18 +1044,24 @@ export class PostgresStorage implements IStorage {
   // Sites
   async getUserSites(userId: number): Promise<Site[]> {
     const res = await this.pool.query(
-      "SELECT * FROM sites WHERE user_id = $1 ORDER BY created_at DESC",
+      "SELECT * FROM sites WHERE user_id = $1 OR is_global = true ORDER BY is_global DESC, created_at DESC",
       [userId],
     );
     return res.rows.map(toSite);
   }
 
   async getActiveSite(userId: number): Promise<Site | undefined> {
-    const res = await this.pool.query(
+    const personal = await this.pool.query(
       "SELECT * FROM sites WHERE user_id = $1 AND is_active = true LIMIT 1",
       [userId],
     );
-    return res.rows[0] ? toSite(res.rows[0]) : undefined;
+    if (personal.rows[0]) {
+      return toSite(personal.rows[0]);
+    }
+    const global = await this.pool.query(
+      "SELECT * FROM sites WHERE is_global = true ORDER BY created_at DESC LIMIT 1",
+    );
+    return global.rows[0] ? toSite(global.rows[0]) : undefined;
   }
 
   async getSiteById(id: number): Promise<Site | undefined> {
@@ -1053,9 +1071,9 @@ export class PostgresStorage implements IStorage {
 
   async addSite(site: InsertSite): Promise<Site> {
     const res = await this.pool.query(
-      `INSERT INTO sites (user_id, name, url, product_price, is_active)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [site.userId, site.name, site.url, site.productPrice ?? null, site.isActive || false],
+      `INSERT INTO sites (user_id, name, url, product_price, is_active, is_global)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [site.userId, site.name, site.url, site.productPrice ?? null, site.isActive || false, site.isGlobal || false],
     );
     return toSite(res.rows[0]);
   }
@@ -1068,6 +1086,7 @@ export class PostgresStorage implements IStorage {
       url: "url",
       productPrice: "product_price",
       isActive: "is_active",
+      isGlobal: "is_global",
     };
     for (const key of Object.keys(data)) {
       const col = map[key];

@@ -44,6 +44,8 @@ import {
   Candy,
   Sparkles,
   Cloud,
+  Search,
+  Pin,
 } from 'lucide-react';
 import { Link } from 'wouter';
 
@@ -66,6 +68,7 @@ interface Site {
   url: string;
   productPrice: string | null;
   isActive: boolean;
+  isGlobal: boolean;
 }
 
 interface Proxy {
@@ -88,6 +91,21 @@ interface ProxyTestResult {
   speed?: number;
 }
 
+interface SiteVerifyResult {
+  ok: boolean;
+  url: string;
+  siteWorks: boolean;
+  productTitle: string | null;
+  productPrice: string | null;
+  siteError: string | null;
+  gateway: string | null;
+  gatewayReply: string | null;
+  gatewayError: string | null;
+  gatewayStatus: string | null;
+  gatewayPrice: string | null;
+  elapsed: number;
+}
+
 import { useCheckerContext } from "@/lib/checker-context";
 import { BinLookup } from "@/components/BinLookup";
 import { Switch } from "@/components/ui/switch";
@@ -106,6 +124,9 @@ export default function Settings() {
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
   const [showThemeDropdown, setShowThemeDropdown] = useState(false);
   const [showFullProxy, setShowFullProxy] = useState<number | null>(null);
+  const [adminSiteUrl, setAdminSiteUrl] = useState('');
+  const [adminSiteName, setAdminSiteName] = useState('');
+  const [verifyResult, setVerifyResult] = useState<SiteVerifyResult | null>(null);
 
   const { data: sites = [], isLoading: sitesLoading } = useQuery<Site[]>({
     queryKey: ['/api/sites'],
@@ -214,6 +235,54 @@ export default function Settings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
       toast({ title: 'Site activated!', soundType: 'success' });
+    },
+  });
+
+  const verifySiteMutation = useMutation<SiteVerifyResult, Error, { url: string }>({
+    mutationFn: async ({ url }) => {
+      const res = await authFetch('/api/admin/sites/verify', {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Verification failed');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setVerifyResult(data);
+    },
+    onError: (error) => {
+      toast({ title: 'Verification failed', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  const addGlobalSiteMutation = useMutation({
+    mutationFn: async ({ url, name, productPrice }: { url: string; name: string; productPrice: string | null }) => {
+      const res = await authFetch('/api/admin/sites', {
+        method: 'POST',
+        body: JSON.stringify({
+          url,
+          name: name || undefined,
+          productPrice: productPrice || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to add site');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
+      setAdminSiteUrl('');
+      setAdminSiteName('');
+      setVerifyResult(null);
+      toast({ title: 'Global site added for all users', soundType: 'success' });
+    },
+    onError: (error) => {
+      toast({ title: 'Failed to add site', description: error.message, variant: 'destructive' });
     },
   });
 
@@ -434,7 +503,163 @@ export default function Settings() {
       </motion.header>
 
       <main className="px-4 space-y-5">
-        
+
+        {user?.isAdmin && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.05 }}
+            data-testid="admin-add-site-card"
+          >
+            <Card className="p-5 rounded-3xl bg-gradient-to-br from-amber-50 to-rose-50/60 dark:from-amber-500/10 dark:to-rose-500/5 backdrop-blur-sm border-amber-200/60 dark:border-amber-500/30 shadow-xl shadow-amber-200/20 dark:shadow-none">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-rose-500 flex items-center justify-center shadow-lg shadow-amber-500/20">
+                  <Pin className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h2 className="font-bold text-lg">Add Global Site</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Verify a store then share it with all users</p>
+                </div>
+              </div>
+
+              <div className="space-y-3 mb-4">
+                <Input
+                  placeholder="Store URL — https://store.myshopify.com"
+                  value={adminSiteUrl}
+                  onChange={(e) => {
+                    setAdminSiteUrl(e.target.value);
+                    setVerifyResult(null);
+                  }}
+                  disabled={verifySiteMutation.isPending || addGlobalSiteMutation.isPending}
+                  className="rounded-xl bg-white/70 dark:bg-slate-800 border-slate-200 dark:border-slate-700 font-mono text-sm"
+                  data-testid="input-admin-site-url"
+                />
+                <Input
+                  placeholder="Display name (optional — defaults to domain)"
+                  value={adminSiteName}
+                  onChange={(e) => setAdminSiteName(e.target.value)}
+                  disabled={verifySiteMutation.isPending || addGlobalSiteMutation.isPending}
+                  className="rounded-xl bg-white/70 dark:bg-slate-800 border-slate-200 dark:border-slate-700 font-medium"
+                  data-testid="input-admin-site-name"
+                />
+                <Button
+                  onClick={() => verifySiteMutation.mutate({ url: adminSiteUrl })}
+                  disabled={!adminSiteUrl.trim() || verifySiteMutation.isPending || addGlobalSiteMutation.isPending}
+                  className="w-full rounded-xl bg-gradient-to-r from-amber-500 to-rose-500 text-white font-semibold shadow-lg shadow-amber-500/20 border-0"
+                  size="lg"
+                  data-testid="button-verify-site"
+                >
+                  {verifySiteMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                      Verifying store & hitting gateway...
+                    </>
+                  ) : (
+                    <>
+                      <Search className="w-5 h-5 mr-2" />
+                      Verify Site
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              <AnimatePresence>
+                {verifyResult && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className={`p-4 rounded-2xl border space-y-3 ${
+                      verifyResult.siteWorks
+                        ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30'
+                        : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/30'
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        {verifyResult.siteWorks ? (
+                          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                        ) : (
+                          <XCircle className="w-5 h-5 text-rose-500" />
+                        )}
+                        <span className={`font-bold ${verifyResult.siteWorks ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                          {verifyResult.siteWorks ? 'Store works' : 'Store check failed'}
+                        </span>
+                        <span className="ml-auto text-xs text-muted-foreground">{Math.round(verifyResult.elapsed / 1000)}s</span>
+                      </div>
+
+                      {verifyResult.siteWorks ? (
+                        <div className="space-y-1.5 text-sm">
+                          <div className="flex items-center gap-2 text-muted-foreground">
+                            <Globe className="w-4 h-4 text-blue-500" />
+                            <span>{verifyResult.productTitle}</span>
+                          </div>
+                          {verifyResult.productPrice && (
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-500 font-mono">
+                                {verifyResult.productPrice}
+                              </span>
+                              <span className="text-xs text-muted-foreground">lowest product price</span>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-rose-600 dark:text-rose-400 flex items-center gap-2">
+                          <AlertCircle className="w-4 h-4" />
+                          {verifyResult.siteError}
+                        </p>
+                      )}
+
+                      <div className="p-3 rounded-xl bg-white/50 dark:bg-slate-800/50 border border-border">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <Activity className="w-4 h-4 text-purple-500" />
+                          <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Gateway Reply</span>
+                          {verifyResult.gateway && (
+                            <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-500 font-mono">
+                              {verifyResult.gateway}
+                            </span>
+                          )}
+                        </div>
+                        {verifyResult.gatewayReply ? (
+                          <p className="text-sm font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                            {verifyResult.gatewayReply}
+                            {verifyResult.gatewayPrice && <span className="ml-2 text-emerald-500/80">{verifyResult.gatewayPrice}</span>}
+                          </p>
+                        ) : (
+                          <p className="text-sm text-rose-600 dark:text-rose-400 font-mono">
+                            {verifyResult.gatewayError || 'No reply (timeout/blocked)'}
+                          </p>
+                        )}
+                      </div>
+
+                      <Button
+                        onClick={() => addGlobalSiteMutation.mutate({
+                          url: adminSiteUrl.trim(),
+                          name: adminSiteName.trim(),
+                          productPrice: verifyResult.productPrice,
+                        })}
+                        disabled={!verifyResult.ok || addGlobalSiteMutation.isPending}
+                        className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold shadow-lg shadow-emerald-500/20 border-0"
+                        size="lg"
+                        data-testid="button-add-global-site"
+                      >
+                        {addGlobalSiteMutation.isPending ? (
+                          <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                        ) : (
+                          <>
+                            <Pin className="w-5 h-5 mr-2" />
+                            Add as Global Site
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </Card>
+          </motion.div>
+        )}
+
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -530,6 +755,11 @@ export default function Settings() {
                         )}
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
+                            {site.isGlobal && (
+                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 flex-shrink-0">
+                                Global
+                              </span>
+                            )}
                             <p className="font-semibold text-sm truncate">{site.name}</p>
                             {site.productPrice && (
                               <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-mono">
@@ -541,7 +771,7 @@ export default function Settings() {
                         </div>
                       </div>
                       <div className="flex items-center gap-1 flex-shrink-0">
-                        {!site.isActive && (
+                        {!site.isGlobal && !site.isActive && (
                           <Button
                             variant="ghost"
                             size="icon"
@@ -553,17 +783,19 @@ export default function Settings() {
                             <CheckCircle className="w-5 h-5 text-emerald-500" />
                           </Button>
                         )}
+                        {(!site.isGlobal || user?.isAdmin) && (
                         <Button
                           variant="ghost"
                           size="icon"
                           onClick={() => deleteSiteMutation.mutate(site.id)}
-                          className="h-9 w-9 rounded-xl text-rose-500"
                           disabled={deleteSiteMutation.isPending}
+                          className="h-9 w-9 rounded-xl text-rose-500"
                           data-testid={`button-delete-site-${site.id}`}
                         >
-                          <Trash2 className="w-5 h-5" />
-                        </Button>
-                      </div>
+<Trash2 className="w-5 h-5" />
+                          </Button>
+                          )}
+                        </div>
                     </motion.div>
                   ))}
                 </div>

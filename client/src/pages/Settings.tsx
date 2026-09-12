@@ -46,6 +46,7 @@ import {
   Cloud,
   Search,
   Pin,
+  Pencil,
 } from 'lucide-react';
 import { Link } from 'wouter';
 
@@ -127,6 +128,8 @@ export default function Settings() {
   const [adminSiteUrl, setAdminSiteUrl] = useState('');
   const [adminSiteName, setAdminSiteName] = useState('');
   const [verifyResult, setVerifyResult] = useState<SiteVerifyResult | null>(null);
+  const [editingSiteId, setEditingSiteId] = useState<number | null>(null);
+  const [editingSiteName, setEditingSiteName] = useState('');
 
   const { data: sites = [], isLoading: sitesLoading } = useQuery<Site[]>({
     queryKey: ['/api/sites'],
@@ -225,6 +228,25 @@ export default function Settings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
       toast({ title: 'Site removed', sound: false });
+    },
+  });
+
+  const updateSiteMutation = useMutation({
+    mutationFn: async ({ id, name }: { id: number; name: string }) => {
+      const res = await authFetch(`/api/sites/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
+      setEditingSiteId(null);
+      setEditingSiteName('');
+      toast({ title: 'Site renamed', soundType: 'success' });
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to rename site', description: error.message, variant: 'destructive' });
     },
   });
 
@@ -730,61 +752,86 @@ export default function Settings() {
               ) : (
                 <div className="space-y-2">
                   {sites.map((site, index) => (
-                    <motion.div
-                      key={site.id}
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 20 }}
-                      transition={{ delay: index * 0.05 }}
-                      className={`flex items-center justify-between p-4 rounded-2xl border transition-all ${
-                        site.isActive 
-                          ? 'border-emerald-300 dark:border-emerald-500/40 bg-gradient-to-r from-emerald-50 to-emerald-100/50 dark:from-emerald-500/10 dark:to-emerald-500/5' 
-                          : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'
-                      }`}
-                      data-testid={`site-item-${site.id}`}
-                    >
-                      <div className="flex items-center gap-3 flex-1 min-w-0">
-                        {site.isActive && (
-                          <motion.div
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                            className="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center"
-                          >
-                            <Radio className="w-4 h-4 text-emerald-500" />
-                          </motion.div>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            {site.isGlobal && (
-                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 flex-shrink-0">
-                                Global
-                              </span>
-                            )}
-                            <p className="font-semibold text-sm truncate">{site.name}</p>
-                            {site.productPrice && (
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-mono">
-                                {site.productPrice}
-                              </span>
+                    <div key={site.id} className="space-y-2">
+                      <motion.div
+                        initial={{ opacity: 0, x: -20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: 20 }}
+                        transition={{ delay: index * 0.05 }}
+                        className={`flex items-center justify-between p-4 rounded-2xl border transition-all ${
+                          site.isActive 
+                            ? 'border-emerald-300 dark:border-emerald-500/40 bg-gradient-to-r from-emerald-50 to-emerald-100/50 dark:from-emerald-500/10 dark:to-emerald-500/5' 
+                            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'
+                        }`}
+                        data-testid={`site-item-${site.id}`}
+                      >
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          {site.isActive && (
+                            <motion.div
+                              initial={{ scale: 0 }}
+                              animate={{ scale: 1 }}
+                              className="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center"
+                            >
+                              <Radio className="w-4 h-4 text-emerald-500" />
+                            </motion.div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              {site.isGlobal && (
+                                <>
+                                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 flex-shrink-0">
+                                    Global
+                                  </span>
+                                  {!user?.isAdmin && (
+                                    <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 flex-shrink-0">
+                                      <CheckCircle2 className="w-3 h-3 inline -mt-0.5 mr-0.5" />
+                                      Added
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                              <p className="font-semibold text-sm truncate">{site.name}</p>
+                              {site.productPrice && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-mono">
+                                  {site.productPrice}
+                                </span>
+                              )}
+                            </div>
+                            {(!site.isGlobal || user?.isAdmin) && (
+                              <p className="text-xs text-slate-400 truncate font-mono">{site.url}</p>
                             )}
                           </div>
-                          <p className="text-xs text-slate-400 truncate font-mono">{site.url}</p>
                         </div>
-                      </div>
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        {!site.isGlobal && !site.isActive && (
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          {!site.isGlobal && !site.isActive && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => activateSiteMutation.mutate(site.id)}
+                              disabled={activateSiteMutation.isPending}
+                              className="h-9 w-9 rounded-xl"
+                              data-testid={`button-activate-site-${site.id}`}
+                            >
+                              <CheckCircle className="w-5 h-5 text-emerald-500" />
+                            </Button>
+                          )}
+                          {(!site.isGlobal || user?.isAdmin) && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => {
+                                setEditingSiteId(editingSiteId === site.id ? null : site.id);
+                                setEditingSiteName(site.name);
+                              }}
+                              disabled={updateSiteMutation.isPending}
+                              className="h-9 w-9 rounded-xl"
+                              data-testid={`button-edit-site-${site.id}`}
+                            >
+                              <Pencil className="w-4 h-4 text-slate-500" />
+                            </Button>
+                            )}
+                          {(!site.isGlobal || user?.isAdmin) && (
                           <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => activateSiteMutation.mutate(site.id)}
-                            disabled={activateSiteMutation.isPending}
-                            className="h-9 w-9 rounded-xl"
-                            data-testid={`button-activate-site-${site.id}`}
-                          >
-                            <CheckCircle className="w-5 h-5 text-emerald-500" />
-                          </Button>
-                        )}
-                        {(!site.isGlobal || user?.isAdmin) && (
-                        <Button
                           variant="ghost"
                           size="icon"
                           onClick={() => deleteSiteMutation.mutate(site.id)}
@@ -796,7 +843,59 @@ export default function Settings() {
                           </Button>
                           )}
                         </div>
-                    </motion.div>
+                      </motion.div>
+                      {editingSiteId === site.id && (
+                        <div className="flex items-center gap-2 p-3 rounded-2xl border border-primary/40 bg-primary/5">
+                          <Input
+                            value={editingSiteName}
+                            onChange={(e) => setEditingSiteName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && editingSiteName.trim()) {
+                                updateSiteMutation.mutate({ id: site.id, name: editingSiteName.trim() });
+                              }
+                              if (e.key === 'Escape') {
+                                setEditingSiteId(null);
+                                setEditingSiteName('');
+                              }
+                            }}
+                            placeholder="Display name"
+                            className="rounded-xl bg-white/70 dark:bg-slate-800 font-medium"
+                            data-testid={`input-rename-site-${site.id}`}
+                            autoFocus
+                          />
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              if (editingSiteName.trim()) {
+                                updateSiteMutation.mutate({ id: site.id, name: editingSiteName.trim() });
+                              }
+                            }}
+                            disabled={!editingSiteName.trim() || updateSiteMutation.isPending}
+                            className="h-9 w-9 rounded-xl"
+                            data-testid={`button-save-site-name-${site.id}`}
+                          >
+                            {updateSiteMutation.isPending ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Save className="w-4 h-4 text-emerald-500" />
+                            )}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setEditingSiteId(null);
+                              setEditingSiteName('');
+                            }}
+                            className="h-9 w-9 rounded-xl"
+                            data-testid={`button-cancel-edit-site-${site.id}`}
+                          >
+                            <X className="w-4 h-4 text-slate-500" />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
               )}

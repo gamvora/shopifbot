@@ -685,7 +685,10 @@ export async function registerRoutes(
 
   app.post(api.check.start.path, authMiddleware, async (req: AuthRequest, res) => {
     try {
-      const { targetUrl, proxyList, cardList, siteId } = req.body;
+      const { cards, siteId } = req.body;
+      const cardList = cards;
+      const targetUrl = 'https://shopify-checkout.com'; // Default checkout URL
+      const proxyList = ''; // Empty by default, user can add proxies in settings
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
       
       const session = await storage.createCheckSession({

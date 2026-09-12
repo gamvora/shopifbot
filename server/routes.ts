@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { WS_EVENTS, ADMIN_TELEGRAM_ID } from "@shared/schema";
+import { selectAPI, buildCheckUrl } from "./api-config";
 const CHECK_API_URL = process.env.CHECK_API_URL || 'https://apicleen-production-d7b1.up.railway.app/api/check';
 import jwt from "jsonwebtoken";
 import { telegramService } from "./services/telegram";
@@ -158,21 +159,27 @@ export async function registerRoutes(
     const cardPrefix = card.substring(0, 6);
     onLog(`Checking card ${cardPrefix}...`);
 
-    let url = `${CHECK_API_URL}?cc=${encodeURIComponent(card)}&site=${encodeURIComponent(siteUrl)}`;
-    if (proxy && proxy.trim().length > 0) {
-      url += `&proxy=${encodeURIComponent(proxy.trim())}`;
-    }
-
     try {
+      // Select API based on proxy usage
+      const hasProxy = proxy && proxy.trim().length > 0;
+      const selectedAPI = selectAPI(hasProxy);
+      onLog(`Using API: ${selectedAPI.substring(0, 50)}...`);
+      
+      // Build URL with proper site protocol
+      const url = buildCheckUrl(selectedAPI, card, siteUrl, proxy);
+      onLog(`Request: ${url.substring(0, 100)}...`);
+
       const response = await fetch(url, {
         signal: AbortSignal.timeout(120000),
       });
 
       if (!response.ok) {
-        return { status: 'error', message: 'API Error' };
+        onLog(`API returned status ${response.status}`);
+        return { status: 'error', message: `API Error: ${response.status}` };
       }
 
       const data = await response.json() as any;
+      onLog(`Response: ${JSON.stringify(data).substring(0, 100)}...`);
 
       const apiStatus = (data.Status || '').toLowerCase();
       const apiResponse = data.Response || data.Status || 'Unknown';

@@ -81,8 +81,7 @@ ${isAdmin ? `
 <b>Admin Commands:</b>
 /credit [id] [amount] - Add/remove credits
 /user [id] - View user details
-/broadcast [msg] - Send to all users` : ''}
-`, 'Open NexusChecker', WEBAPP_URL);
+/broadcast [msg] - Send to all users` : ''}\n`, 'Open NexusChecker', WEBAPP_URL);
     return;
   }
 
@@ -426,6 +425,7 @@ export async function setWebhook(webhookUrl: string): Promise<boolean> {
   }
   
   try {
+    console.log(`[BOT] Attempting to set webhook to: ${webhookUrl}`);
     const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -476,8 +476,9 @@ export async function initBot(): Promise<void> {
   const hasPublicDomain = !!process.env.RAILWAY_PUBLIC_DOMAIN || !!process.env.REPL_SLUG;
 
   if (isProduction && hasPublicDomain) {
-    console.log(`[BOT] Production mode - using webhook only (${WEBAPP_URL})`);
+    console.log(`[BOT] Production mode - using webhook (Domain: ${WEBAPP_URL})`);
     const webhookUrl = `${WEBAPP_URL}/api/telegram/webhook`;
+    console.log(`[BOT] Setting webhook URL: ${webhookUrl}`);
     await setWebhook(webhookUrl);
   } else {
     console.log('[BOT] Development mode - using polling');
@@ -542,3 +543,4 @@ export function stopPolling(): void {
   pollingActive = false;
   console.log('[BOT] Polling stopped');
 }
+

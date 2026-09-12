@@ -776,6 +776,31 @@ export async function registerRoutes(
     res.json({ status: 'ok' });
   });
 
+  // Captcha endpoints
+  app.get('/api/captcha', (req, res) => {
+    try {
+      const captcha = generateCaptcha();
+      // Generate simple image by returning the numbers
+      // The frontend will create a canvas-based image from these
+      res.json({
+        id: captcha.id,
+        numbers: captcha.numbers
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/captcha/verify', (req, res) => {
+    try {
+      const { id, answer } = req.body;
+      const isValid = verifyCaptcha(id, answer);
+      res.json({ valid: isValid });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   initBot();
 
   return httpServer;

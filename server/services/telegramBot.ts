@@ -525,6 +525,7 @@ export async function initBot(): Promise<void> {
   
   // Always use polling - more reliable than webhook
   await deleteWebhook();
+  await setBotCommands();
   startPolling();
 }
 
@@ -544,6 +545,57 @@ export async function deleteWebhook(): Promise<boolean> {
   } catch (error) {
     console.error('[BOT] Error deleting webhook:', error);
     return false;
+  }
+}
+
+const BOT_COMMANDS = [
+  { command: 'start', description: 'Start the bot and open the app' },
+  { command: 'balance', description: 'Check your credits' },
+  { command: 'myid', description: 'Get your Telegram ID' },
+];
+
+const ADMIN_BOT_COMMANDS = [
+  { command: 'credit', description: 'Add/remove credits (admin)' },
+  { command: 'gencode', description: 'Create a single-use redeem code (admin)' },
+  { command: 'user', description: 'View user details (admin)' },
+  { command: 'broadcast', description: 'Send a message to all users (admin)' },
+];
+
+async function setBotCommands(): Promise<void> {
+  if (!BOT_TOKEN) return;
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`;
+  try {
+    const defaultBody = JSON.stringify({
+      commands: BOT_COMMANDS,
+      scope: { type: 'default' },
+    });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: defaultBody,
+    });
+    if (!res.ok) {
+      console.error(`[BOT] Failed to register default commands: ${res.status} ${await res.text()}`);
+    }
+
+    if (ADMIN_ID) {
+      const adminBody = JSON.stringify({
+        commands: [...BOT_COMMANDS, ...ADMIN_BOT_COMMANDS],
+        scope: { type: 'chat', chat_id: parseInt(ADMIN_ID, 10) },
+      });
+      const adminRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: adminBody,
+      });
+      if (!adminRes.ok) {
+        console.error(`[BOT] Failed to register admin commands: ${adminRes.status} ${await adminRes.text()}`);
+      }
+    }
+
+    console.log('[BOT] ✅ Bot commands registered');
+  } catch (error) {
+    console.error('[BOT] Error setting bot commands:', error);
   }
 }
 

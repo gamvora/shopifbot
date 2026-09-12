@@ -19,6 +19,7 @@ import {
   type DailyStreak,
   type NotificationSettings,
   type InsertNotificationSettings,
+  type RedeemCode,
   ADMIN_TELEGRAM_ID,
 } from "@shared/schema";
 
@@ -50,6 +51,15 @@ function writeJSON<T>(filename: string, data: T[]): void {
 function generateId(items: { id: number }[]): number {
   if (items.length === 0) return 1;
   return Math.max(...items.map((item) => item.id)) + 1;
+}
+
+function generateRedeemCode(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
 }
 
 export interface IStorage {
@@ -96,6 +106,11 @@ export interface IStorage {
   // Credit Transactions
   addCreditTransaction(userId: number, amount: number, type: string, description?: string, adminId?: string): Promise<CreditTransaction>;
   getCreditTransactions(userId: number, limit?: number): Promise<CreditTransaction[]>;
+
+  // Redeem Codes
+  createRedeemCode(credits: number, createdBy: string): Promise<RedeemCode>;
+  getRedeemCode(code: string): Promise<RedeemCode | undefined>;
+  redeemCode(code: string, userId: number, telegramId: string): Promise<{ status: 'success'; code: RedeemCode; user: User } | { status: 'invalid' } | { status: 'used' }>;
 
   // Global Stats & Leaderboard
   getGlobalStats(): Promise<{ totalCards: number; totalLive: number; totalDead: number; hitRate: number }>;
@@ -478,6 +493,47 @@ export class FileStorage implements IStorage {
       .slice(0, limit);
   }
 
+  // Redeem Codes
+  async createRedeemCode(credits: number, createdBy: string): Promise<RedeemCode> {
+    const codes = readJSON<RedeemCode>("redeemCodes");
+    let candidate = generateRedeemCode();
+    while (codes.some((c) => c.code === candidate)) {
+      candidate = generateRedeemCode();
+    }
+    const newCode: RedeemCode = {
+      id: generateId(codes),
+      code: candidate,
+      credits,
+      createdBy,
+      createdAt: new Date(),
+    };
+    codes.push(newCode);
+    writeJSON("redeemCodes", codes);
+    return newCode;
+  }
+
+  async getRedeemCode(code: string): Promise<RedeemCode | undefined> {
+    const codes = readJSON<RedeemCode>("redeemCodes");
+    return codes.find((c) => c.code === code.toUpperCase());
+  }
+
+  async redeemCode(code: string, userId: number, telegramId: string): Promise<{ status: 'success'; code: RedeemCode; user: User } | { status: 'invalid' } | { status: 'used' }> {
+    const codes = readJSON<RedeemCode>("redeemCodes");
+    const index = codes.findIndex((c) => c.code === code.toUpperCase());
+    if (index === -1) {
+      return { status: "invalid" };
+    }
+    if (codes[index].userId) {
+      return { status: "used" };
+    }
+    codes[index] = { ...codes[index], userId, usedAt: new Date() };
+    writeJSON("redeemCodes", codes);
+    const credits = codes[index].credits;
+    const updatedUser = await this.updateUserCredits(telegramId, credits);
+    await this.addCreditTransaction(userId, credits, "redeem", `Redeemed code ${codes[index].code}`, undefined);
+    return { status: "success", code: codes[index], user: updatedUser! };
+  }
+
   async getGlobalStats(): Promise<{ totalCards: number; totalLive: number; totalDead: number; hitRate: number }> {
     const users = readJSON<User>("users");
     const totalLive = users.reduce((sum, u) => sum + u.totalCharged, 0);
@@ -781,6 +837,18 @@ function toCreditTransaction(r: any): CreditTransaction {
   };
 }
 
+function toRedeemCode(r: any): RedeemCode {
+  return {
+    id: r.id,
+    code: r.code,
+    credits: r.credits,
+    userId: r.user_id ?? undefined,
+    usedAt: r.used_at ?? undefined,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+  };
+}
+
 function toReferral(r: any): Referral {
   return {
     id: r.id,
@@ -942,6 +1010,15 @@ export class PostgresStorage implements IStorage {
         daily_summary BOOLEAN NOT NULL DEFAULT false,
         streak_reminder BOOLEAN NOT NULL DEFAULT true,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS redeem_codes (
+        id SERIAL PRIMARY KEY,
+        code TEXT UNIQUE NOT NULL,
+        credits INTEGER NOT NULL,
+        user_id INTEGER,
+        used_at TIMESTAMPTZ,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
     console.log("[PG] ✅ Schema ready");
@@ -1290,6 +1367,47 @@ export class PostgresStorage implements IStorage {
       [userId, limit],
     );
     return res.rows.map(toCreditTransaction);
+  }
+
+  // Redeem Codes
+  async createRedeemCode(credits: number, createdBy: string): Promise<RedeemCode> {
+    let candidate = generateRedeemCode();
+    for (;;) {
+      try {
+        const res = await this.pool.query(
+          `INSERT INTO redeem_codes (code, credits, created_by) VALUES ($1,$2,$3) RETURNING *`,
+          [candidate, credits, createdBy],
+        );
+        return toRedeemCode(res.rows[0]);
+      } catch (err: any) {
+        if (err.code === "23505" && err.constraint?.includes("code")) {
+          candidate = generateRedeemCode();
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  async getRedeemCode(code: string): Promise<RedeemCode | undefined> {
+    const res = await this.pool.query("SELECT * FROM redeem_codes WHERE code = $1", [code.toUpperCase()]);
+    return res.rows[0] ? toRedeemCode(res.rows[0]) : undefined;
+  }
+
+  async redeemCode(code: string, userId: number, telegramId: string): Promise<{ status: 'success'; code: RedeemCode; user: User } | { status: 'invalid' } | { status: 'used' }> {
+    const res = await this.pool.query(
+      `UPDATE redeem_codes SET user_id = $1, used_at = NOW()
+       WHERE code = $2 AND user_id IS NULL RETURNING *`,
+      [userId, code.toUpperCase()],
+    );
+    if (!res.rows[0]) {
+      const existing = await this.getRedeemCode(code);
+      return existing ? { status: "used" } : { status: "invalid" };
+    }
+    const redeemed = toRedeemCode(res.rows[0]);
+    const updatedUser = await this.updateUserCredits(telegramId, redeemed.credits);
+    await this.addCreditTransaction(userId, redeemed.credits, "redeem", `Redeemed code ${redeemed.code}`, undefined);
+    return { status: "success", code: redeemed, user: updatedUser! };
   }
 
   // Global Stats & Leaderboard

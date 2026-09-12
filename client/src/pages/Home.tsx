@@ -690,7 +690,7 @@ export default function Home() {
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
-              className="flex-1 max-w-[200px]"
+              className="flex-1 max-w-[250px]"
             >
               {sites.length === 0 ? (
                 <Link href="/settings">
@@ -700,9 +700,9 @@ export default function Home() {
                 </Link>
               ) : (
                 <div className={`text-center py-2.5 px-4 bg-card rounded-xl border border-border ${stats.active ? 'opacity-50' : ''}`}>
-                  <div className="flex items-center justify-center gap-2">
-                    <CreditCard className="w-4 h-4 text-purple-500" />
-                    <span className="font-semibold text-sm truncate" data-testid="selected-site-name">
+                  <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+                    <CreditCard className="w-4 h-4 text-purple-500 shrink-0" />
+                    <span className="font-semibold text-sm leading-tight break-words" title={selectedSite?.name} data-testid="selected-site-name">
                       {selectedSite?.name || 'Select'}
                     </span>
                     {selectedSite?.isGlobal && (

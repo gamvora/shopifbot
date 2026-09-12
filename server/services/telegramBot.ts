@@ -79,6 +79,7 @@ A professional card validation tool using Shopify checkout gateway.
 ${isAdmin ? `
 <b>Admin Commands:</b>
 /credit [id] [amount] - Add/remove credits
+/gencode [credits] - Create a single-use redeem code
 /user [id] - View user details
 /broadcast [msg] - Send to all users` : ''}\n`, 'Open NexusChecker', WEBAPP_URL);
     return;
@@ -155,6 +156,41 @@ Balance: ${updatedUser.credits} credits
     } else {
       await sendMessage(chat.id, 'Failed to update credits.');
     }
+    return;
+  }
+
+  if (text.startsWith('/gencode') && isAdmin) {
+    const parts = text.split(' ');
+    if (parts.length < 2) {
+      await sendMessage(chat.id, `
+<b>Redeem Code Generator</b>
+
+Creates a single-use redeem code that users can claim under <b>Rewards → Redeem</b> in the app.
+
+Usage: <code>/gencode [credits]</code>
+
+Examples:
+• <code>/gencode 100</code> - Create a 100-credit code
+      `);
+      return;
+    }
+
+    const credits = parseInt(parts[1]);
+    if (isNaN(credits) || credits <= 0) {
+      await sendMessage(chat.id, 'Invalid credit amount. Please enter a positive number.');
+      return;
+    }
+
+    const redeemCode = await storage.createRedeemCode(credits, senderId);
+    await sendMessage(chat.id, `
+<b>🎟️ Redeem Code Created</b>
+
+Code: <code>${redeemCode.code}</code>
+Credits: ${redeemCode.credits}
+Single-use: ✅
+
+Share this code with a user — they can redeem it under <b>Rewards → Redeem</b> in the app.
+      `);
     return;
   }
 

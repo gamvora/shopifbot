@@ -20,6 +20,7 @@ import {
   Calendar,
   Trophy,
   Star,
+  Ticket,
   Home as HomeIcon,
   User,
   Settings as SettingsIcon,
@@ -36,6 +37,7 @@ const STREAK_REWARDS: { [key: number]: number } = {
 export default function Rewards() {
   const { toast } = useToast();
   const [referralInput, setReferralInput] = useState("");
+  const [redeemInput, setRedeemInput] = useState("");
   const [copied, setCopied] = useState(false);
 
   const { data: spinStatus, isLoading: spinLoading, refetch: refetchSpin } = useQuery<{ canSpin: boolean; lastSpin?: any }>({
@@ -130,6 +132,28 @@ export default function Rewards() {
     },
   });
 
+  const redeemMutation = useMutation({
+    mutationFn: async (code: string) => {
+      const res = await apiRequest("POST", "/api/redeem", { code });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Code Redeemed!",
+        description: `+${data.credits} credits added to your balance!`,
+      });
+      setRedeemInput("");
+      queryClient.invalidateQueries({ queryKey: ["/api/credits/balance"] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error.message || "Invalid code",
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleSpin = async () => {
     const result = await spinMutation.mutateAsync();
     return result;
@@ -170,7 +194,7 @@ export default function Rewards() {
         </motion.div>
 
         <Tabs defaultValue="spin" className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="spin" className="flex items-center gap-1" data-testid="tab-spin">
               <Gift className="w-4 h-4" />
               Spin
@@ -182,6 +206,10 @@ export default function Rewards() {
             <TabsTrigger value="referral" className="flex items-center gap-1" data-testid="tab-referral">
               <Users className="w-4 h-4" />
               Referral
+            </TabsTrigger>
+            <TabsTrigger value="redeem" className="flex items-center gap-1" data-testid="tab-redeem">
+              <Ticket className="w-4 h-4" />
+              Redeem
             </TabsTrigger>
           </TabsList>
 
@@ -366,6 +394,48 @@ export default function Rewards() {
                     data-testid="button-apply-referral"
                   >
                     Apply
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="redeem" className="mt-4">
+            <Card className="relative overflow-hidden">
+              <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-purple-500 via-pink-500 to-purple-500" />
+              <CardHeader className="text-center">
+                <CardTitle className="flex items-center justify-center gap-2">
+                  <Ticket className="w-5 h-5 text-purple-500" />
+                  Redeem Code
+                </CardTitle>
+                <CardDescription>
+                  Enter a promo code to instantly add free credits to your balance
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-center p-4 bg-purple-500/10 rounded-xl border border-purple-500/20">
+                  <div className="text-center">
+                    <div className="text-sm text-muted-foreground">Fun Fact</div>
+                    <div className="text-sm font-medium mt-1">
+                      Each code is single-use and can only be claimed by one person
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Enter code... e.g. ABCD-EFGH"
+                    value={redeemInput}
+                    onChange={(e) => setRedeemInput(e.target.value.toUpperCase())}
+                    className="font-mono"
+                    data-testid="input-redeem-code"
+                  />
+                  <Button
+                    onClick={() => redeemMutation.mutate(redeemInput)}
+                    disabled={!redeemInput || redeemMutation.isPending}
+                    className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white shadow-lg shadow-purple-500/20 border-0"
+                    data-testid="button-redeem-code"
+                  >
+                    {redeemMutation.isPending ? "Redeeming..." : "Redeem"}
                   </Button>
                 </div>
               </CardContent>

@@ -116,6 +116,16 @@ export interface NotificationSettings {
   updatedAt: Date;
 }
 
+export interface RedeemCode {
+  id: number;
+  code: string;
+  credits: number;
+  userId?: number;
+  usedAt?: Date;
+  createdBy: string;
+  createdAt: Date;
+}
+
 // === INSERT SCHEMAS ===
 
 export const insertUserSchema = z.object({
@@ -209,6 +219,12 @@ export const insertNotificationSettingsSchema = z.object({
   streakReminder: z.boolean().optional(),
 });
 
+export const insertRedeemCodeSchema = z.object({
+  code: z.string(),
+  credits: z.number(),
+  createdBy: z.string(),
+});
+
 // === TYPES ===
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertSite = z.infer<typeof insertSiteSchema>;
@@ -220,6 +236,7 @@ export type InsertReferral = z.infer<typeof insertReferralSchema>;
 export type InsertDailySpin = z.infer<typeof insertDailySpinSchema>;
 export type InsertDailyStreak = z.infer<typeof insertDailyStreakSchema>;
 export type InsertNotificationSettings = z.infer<typeof insertNotificationSettingsSchema>;
+export type InsertRedeemCode = z.infer<typeof insertRedeemCodeSchema>;
 
 // Admin ID constant
 export const ADMIN_TELEGRAM_ID = "5197976453";

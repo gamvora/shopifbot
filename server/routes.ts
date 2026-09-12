@@ -9,7 +9,7 @@ const CHECK_API_URL = process.env.CHECK_API_URL || 'https://apicleen-production-
 import jwt from "jsonwebtoken";
 import { telegramService } from "./services/telegram";
 import { handleBotUpdate, initBot, sendChargedCardNotification } from "./services/telegramBot";
-import { setWss } from "./services/wsManager";
+import { setWss, broadcastToTelegramId } from "./services/wsManager";
 import { searchTracks as spotifySearch, getAccessTokenForClient, playTrack as spotifyPlayTrack } from "./services/spotify";
 import { generateCaptcha, verifyCaptcha } from "./captcha";
 import { checkProxyValidity } from "./proxy-checker";
@@ -1144,6 +1144,30 @@ export async function registerRoutes(
       await storage.updateUserCredits(req.user!.telegramId, 50);
       await storage.updateUserCredits(refUser.telegramId, 100);
       res.json({ creditsEarned: 50 });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Redeem Codes
+  app.post('/api/redeem', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { code } = req.body;
+      if (!code || typeof code !== 'string' || !code.trim()) {
+        return res.status(400).json({ error: 'Please enter a code' });
+      }
+      const result = await storage.redeemCode(code.trim().toUpperCase(), req.user!.id, req.user!.telegramId);
+      if (result.status === 'invalid') {
+        return res.status(400).json({ error: 'Invalid code' });
+      }
+      if (result.status === 'used') {
+        return res.status(400).json({ error: 'This code was already used' });
+      }
+      broadcastToTelegramId(req.user!.telegramId, {
+        type: WS_EVENTS.CREDITS_UPDATE,
+        payload: { credits: result.user.credits },
+      });
+      res.json({ code: result.code.code, credits: result.code.credits, balance: result.user.credits });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }

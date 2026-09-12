@@ -4,6 +4,7 @@ import { broadcastToTelegramId } from './wsManager';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const ADMIN_ID = process.env.TELEGRAM_ADMIN_ID || ADMIN_TELEGRAM_ID;
+const CHANNEL_URL = process.env.TELEGRAM_CHANNEL_URL || 'https://t.me/+RBJbJ2A_JpNiODU0';
 const WEBAPP_URL = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : (process.env.WEBAPP_URL || 'https://chkzz.replit.app');
 
 interface TelegramUpdate {
@@ -61,7 +62,7 @@ export async function handleBotUpdate(update: TelegramUpdate): Promise<void> {
   console.log(`[BOT] Processing update ${update.update_id}: ${text.substring(0, 20)}... from ${senderId}`);
 
   if (text.startsWith('/start')) {
-    await sendMessageWithButton(chat.id, `
+    await sendMessageWithButtons(chat.id, `
 <b>Welcome to NexusChecker</b>
 
 A professional card validation tool using Shopify checkout gateway.
@@ -76,12 +77,30 @@ A professional card validation tool using Shopify checkout gateway.
 <b>Commands:</b>
 /balance - Check your credits
 /myid - Get your Telegram ID
+/channel - Join our announcement channel
 ${isAdmin ? `
 <b>Admin Commands:</b>
 /credit [id] [amount] - Add/remove credits
 /gencode [credits] - Create a single-use redeem code
 /user [id] - View user details
-/broadcast [msg] - Send to all users` : ''}\n`, 'Open NexusChecker', WEBAPP_URL);
+/broadcast [msg] - Send to all users` : ''}\n`, [
+      { text: '📢 Join Channel', url: CHANNEL_URL },
+      { text: '🚀 Open NexusChecker', webApp: WEBAPP_URL },
+    ]);
+    return;
+  }
+
+  if (text.startsWith('/channel')) {
+    await sendMessageWithButtons(chat.id, `
+<b>📢 Join Our Channel</b>
+
+Stay up to date with the latest news, drops, updates and exclusive bonuses for NexusChecker.
+
+Tap the button below to join:
+      `, [
+        { text: '📢 Join Channel', url: CHANNEL_URL },
+        { text: '🚀 Open NexusChecker', webApp: WEBAPP_URL },
+      ]);
     return;
   }
 
@@ -442,6 +461,32 @@ async function sendMessageWithButton(chatId: number | string, text: string, butt
   }
 }
 
+async function sendMessageWithButtons(chatId: number | string, text: string, buttons: Array<{ text: string; url?: string; webApp?: string }>): Promise<boolean> {
+  try {
+    const keyboardRow = buttons.map((b) =>
+      b.webApp !== undefined
+        ? { text: b.text, web_app: { url: b.webApp } }
+        : { text: b.text, url: b.url! }
+    );
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text.trim(),
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [keyboardRow]
+        }
+      }),
+    });
+    return response.ok;
+  } catch (error) {
+    console.error('[BOT] Error sending message with buttons:', error);
+    return false;
+  }
+}
+
 let pollingActive = false;
 let lastUpdateId = 0;
 
@@ -552,6 +597,7 @@ const BOT_COMMANDS = [
   { command: 'start', description: 'Start the bot and open the app' },
   { command: 'balance', description: 'Check your credits' },
   { command: 'myid', description: 'Get your Telegram ID' },
+  { command: 'channel', description: 'Join our announcement channel' },
 ];
 
 const ADMIN_BOT_COMMANDS = [

@@ -12,6 +12,7 @@ import {
   Coins,
   ChevronLeft,
   ChevronRight,
+  Megaphone,
   Home as HomeIcon,
   User,
   Settings as SettingsIcon,
@@ -540,6 +541,26 @@ export default function Home() {
 
       <main className="flex-1 px-4 space-y-4">
         
+        <motion.a
+          href="https://t.me/+RBJbJ2A_JpNiODU0"
+          target="_blank"
+          rel="noopener noreferrer"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.05 }}
+          className="flex items-center gap-3 p-3 rounded-2xl bg-gradient-to-r from-sky-500/15 to-blue-500/10 border border-sky-500/30 hover:border-sky-500/50 hover:from-sky-500/20 transition-colors"
+          data-testid="button-join-channel"
+        >
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center shrink-0 shadow-lg shadow-sky-500/20">
+            <Megaphone className="w-5 h-5 text-white" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold">Join Our Telegram Channel</p>
+            <p className="text-xs text-muted-foreground">Get updates, drops and exclusive bonuses</p>
+          </div>
+          <ChevronRight className="w-4 h-4 text-sky-500 shrink-0" />
+        </motion.a>
+
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

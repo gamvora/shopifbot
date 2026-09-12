@@ -126,6 +126,7 @@ export async function registerRoutes(
     total: number;
     charged: number;
     rejected: number;
+    controller: AbortController | null;
   }
   
   const userJobs = new Map<number, UserJob>();
@@ -140,6 +141,7 @@ export async function registerRoutes(
         total: 0,
         charged: 0,
         rejected: 0,
+        controller: null,
       });
     }
     return userJobs.get(userId)!;
@@ -154,10 +156,21 @@ export async function registerRoutes(
     job.total = 0;
     job.charged = 0;
     job.rejected = 0;
+    if (job.controller) {
+      job.controller.abort();
+      job.controller = null;
+    }
+    broadcastToUser(userId, { type: WS_EVENTS.STATUS_UPDATE, payload: { active: false, processed: 0, total: 0, charged: 0, rejected: 0 } });
+    broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: '⛔ Check stopped by user', type: 'info' } });
   };
 
-  const checkCardWithAPI = async (card: string, siteUrl: string, proxy: string, onLog: (msg: string) => void): Promise<{status: string, message: string, price?: string, gateway?: string}> => {
+  const checkCardWithAPI = async (card: string, siteUrl: string, proxy: string, onLog: (msg: string) => void, stopSignal?: AbortSignal): Promise<{status: string, message: string, price?: string, gateway?: string}> => {
     const cardPrefix = card.substring(0, 6);
+
+    if (stopSignal?.aborted) {
+      return { status: 'error', message: '[STOPPED]' };
+    }
+
     onLog(`Checking card ${cardPrefix}...`);
 
     try {
@@ -170,9 +183,21 @@ export async function registerRoutes(
       const url = buildCheckUrl(selectedAPI, card, siteUrl, proxy);
       onLog(`Request: ${url.substring(0, 100)}...`);
 
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(120000),
-      });
+      // Combine the stop signal with a 120s hard timeout
+      const controller = new AbortController();
+      const onStop = () => controller.abort();
+      if (stopSignal) {
+        stopSignal.addEventListener('abort', onStop, { once: true });
+      }
+      const timeout = setTimeout(() => controller.abort(), 120000);
+
+      let response: Awaited<ReturnType<typeof fetch>>;
+      try {
+        response = await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+        stopSignal?.removeEventListener('abort', onStop);
+      }
 
       if (!response.ok) {
         onLog(`API returned status ${response.status}`);
@@ -198,6 +223,9 @@ export async function registerRoutes(
       };
     } catch (e: any) {
       if (e.name === 'AbortError' || e.name === 'TimeoutError') {
+        if (stopSignal?.aborted) {
+          return { status: 'error', message: '[STOPPED]' };
+        }
         return { status: 'error', message: 'Timeout' };
       }
       return { status: 'error', message: e.message || 'API Error' };
@@ -236,6 +264,8 @@ export async function registerRoutes(
     job.total = cards.length;
     job.charged = 0;
     job.rejected = 0;
+    job.controller = new AbortController();
+    const stopSignal = job.controller.signal;
 
     const proxies = proxyListStr.split('\n')
       .map(p => p.trim())
@@ -304,7 +334,7 @@ export async function registerRoutes(
           let result = await checkCardWithAPI(cardStr, targetUrl, currentProxy, (msg) => {
             if (job.shouldStop) return;
             broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] ${msg}`, type: 'info' } });
-          });
+          }, stopSignal);
           
           // Retry once if error (use different proxy if available)
           if (result.status === 'error' && !job.shouldStop) {
@@ -316,7 +346,7 @@ export async function registerRoutes(
             result = await checkCardWithAPI(cardStr, targetUrl, retryProxy, (msg) => {
               if (job.shouldStop) return;
               broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] ${msg}`, type: 'info' } });
-            });
+            }, stopSignal);
           }
           
           if (job.shouldStop || result.message?.includes('[STOPPED]')) {
@@ -406,6 +436,7 @@ export async function registerRoutes(
 
     job.isRunning = false;
     job.sessionId = null;
+    job.controller = null;
     
     if (!job.shouldStop) {
       broadcastToUser(userId, { type: WS_EVENTS.STATUS_UPDATE, payload: { 

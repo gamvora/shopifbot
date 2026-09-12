@@ -756,6 +756,12 @@ export async function registerRoutes(
     }
   });
 
+  // Telegram webhook - accepts both GET (for verification) and POST (for updates)
+  app.get('/api/telegram/webhook', (req, res) => {
+    console.log('[BOT] Webhook GET request received - verification from Telegram');
+    res.json({ ok: true, status: 'webhook_ready' });
+  });
+
   app.post('/api/telegram/webhook', async (req, res) => {
     try {
       const update = req.body;

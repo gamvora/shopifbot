@@ -107,9 +107,9 @@ export async function registerRoutes(
           onlineList.push({
             telegramId: userClient.telegramId,
             userId: user.id,
-            username: user.username,
-            firstName: user.firstName,
-            photoUrl: user.photoUrl,
+            username: user.username || null,
+            firstName: user.firstName || null,
+            photoUrl: user.photoUrl || null,
             isAdmin: userClient.telegramId === ADMIN_ID,
           });
         }
@@ -162,7 +162,7 @@ export async function registerRoutes(
 
     try {
       // Select API based on proxy usage
-      const hasProxy = proxy && proxy.trim().length > 0;
+      const hasProxy = !!proxy && proxy.trim().length > 0;
       const selectedAPI = selectAPI(hasProxy);
       onLog(`Using API: ${selectedAPI.substring(0, 50)}...`);
       

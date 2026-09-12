@@ -112,9 +112,9 @@ The user will be notified of the credit change.
     // Use getOrCreateUser for idempotent user creation
     const targetUser = await storage.getOrCreateUser({
       telegramId: targetUserId,
-      username: null,
+      username: undefined,
       firstName: 'User',
-      lastName: null,
+      lastName: undefined,
       credits: 0,
       totalCharged: 0,
       totalRejected: 0,

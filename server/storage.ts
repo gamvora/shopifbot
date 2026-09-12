@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { Pool } from "pg";
 import {
   type Settings,
   type InsertSettings,
@@ -423,7 +424,6 @@ export class FileStorage implements IStorage {
       rejectedCards: session.rejectedCards || 0,
       status: session.status || "pending",
       createdAt: new Date(),
-      completedAt: session.completedAt,
     };
     sessions.push(newSession);
     writeJSON("checkSessions", sessions);
@@ -676,4 +676,782 @@ export class FileStorage implements IStorage {
   }
 }
 
-export const storage = new FileStorage();
+// === PostgreSQL Storage ===
+
+function toUser(r: any): User {
+  return {
+    id: r.id,
+    telegramId: r.telegram_id,
+    username: r.username ?? undefined,
+    firstName: r.first_name ?? undefined,
+    lastName: r.last_name ?? undefined,
+    photoUrl: r.photo_url ?? undefined,
+    credits: r.credits,
+    totalCharged: r.total_charged,
+    totalRejected: r.total_rejected,
+    isAdmin: r.is_admin,
+    hasSeenTutorial: r.has_seen_tutorial,
+    referralCode: r.referral_code ?? undefined,
+    referredBy: r.referred_by ?? undefined,
+    createdAt: r.created_at,
+    lastActiveAt: r.last_active_at,
+  };
+}
+
+function toSite(r: any): Site {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    name: r.name,
+    url: r.url,
+    productPrice: r.product_price ?? undefined,
+    isActive: r.is_active,
+    createdAt: r.created_at,
+  };
+}
+
+function toProxy(r: any): Proxy {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    proxy: r.proxy,
+    isValid: r.is_valid,
+    lastChecked: r.last_checked ?? undefined,
+    createdAt: r.created_at,
+  };
+}
+
+function toSettings(r: any): Settings {
+  return {
+    id: r.id,
+    targetUrl: r.target_url,
+    proxyList: r.proxy_list,
+    proxyEnabled: r.proxy_enabled,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toResult(r: any): CheckResult {
+  return {
+    id: r.id,
+    userId: r.user_id ?? undefined,
+    sessionId: r.session_id ?? undefined,
+    card: r.card,
+    status: r.status,
+    message: r.message ?? undefined,
+    createdAt: r.created_at,
+  };
+}
+
+function toCheckSession(r: any): CheckSession {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    userId: r.user_id,
+    siteId: r.site_id ?? undefined,
+    totalCards: r.total_cards,
+    processedCards: r.processed_cards,
+    chargedCards: r.charged_cards,
+    rejectedCards: r.rejected_cards,
+    status: r.status,
+    createdAt: r.created_at,
+    completedAt: r.completed_at ?? undefined,
+  };
+}
+
+function toCreditTransaction(r: any): CreditTransaction {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    amount: r.amount,
+    type: r.type,
+    description: r.description ?? undefined,
+    adminId: r.admin_id ?? undefined,
+    createdAt: r.created_at,
+  };
+}
+
+function toReferral(r: any): Referral {
+  return {
+    id: r.id,
+    referrerId: r.referrer_id,
+    referredId: r.referred_id,
+    referralCode: r.referral_code,
+    creditsAwarded: r.credits_awarded,
+    createdAt: r.created_at,
+  };
+}
+
+function toDailySpin(r: any): DailySpin {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    creditsWon: r.credits_won,
+    spinDate: r.spin_date,
+  };
+}
+
+function toDailyStreak(r: any): DailyStreak {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    currentStreak: r.current_streak,
+    longestStreak: r.longest_streak,
+    lastClaimDate: r.last_claim_date ?? undefined,
+    totalClaimed: r.total_claimed,
+  };
+}
+
+function toNotificationSettings(r: any): NotificationSettings {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    approvedAlerts: r.approved_alerts,
+    dailySummary: r.daily_summary,
+    streakReminder: r.streak_reminder,
+    updatedAt: r.updated_at,
+  };
+}
+
+export class PostgresStorage implements IStorage {
+  private pool: Pool;
+
+  constructor(databaseUrl: string) {
+    this.pool = new Pool({
+      connectionString: databaseUrl,
+      // Railway internal Postgres is plain TCP; only use SSL when explicitly requested
+      ssl: databaseUrl.includes("railway.internal") ? false : undefined,
+    });
+    this.init().catch((err) => {
+      console.error("[PG] ⚠️ Failed to initialize schema:", err);
+    });
+  }
+
+  private async init(): Promise<void> {
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        telegram_id TEXT UNIQUE NOT NULL,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        photo_url TEXT,
+        credits INTEGER NOT NULL DEFAULT 0,
+        total_charged INTEGER NOT NULL DEFAULT 0,
+        total_rejected INTEGER NOT NULL DEFAULT 0,
+        is_admin BOOLEAN NOT NULL DEFAULT false,
+        has_seen_tutorial BOOLEAN NOT NULL DEFAULT false,
+        referral_code TEXT,
+        referred_by INTEGER,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS sites (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        product_price TEXT,
+        is_active BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS proxies (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        proxy TEXT NOT NULL,
+        is_valid BOOLEAN NOT NULL DEFAULT true,
+        last_checked TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS settings (
+        id SERIAL PRIMARY KEY,
+        target_url TEXT NOT NULL DEFAULT '',
+        proxy_list TEXT NOT NULL DEFAULT '',
+        proxy_enabled BOOLEAN NOT NULL DEFAULT true,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS results (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        session_id TEXT,
+        card TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS check_sessions (
+        id SERIAL PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        site_id INTEGER,
+        total_cards INTEGER NOT NULL DEFAULT 0,
+        processed_cards INTEGER NOT NULL DEFAULT 0,
+        charged_cards INTEGER NOT NULL DEFAULT 0,
+        rejected_cards INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      );
+      CREATE TABLE IF NOT EXISTS credit_transactions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        amount INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        description TEXT,
+        admin_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS referrals (
+        id SERIAL PRIMARY KEY,
+        referrer_id INTEGER NOT NULL,
+        referred_id INTEGER NOT NULL,
+        referral_code TEXT NOT NULL,
+        credits_awarded INTEGER NOT NULL DEFAULT 100,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS daily_spins (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        credits_won INTEGER NOT NULL,
+        spin_date TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS daily_streaks (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER UNIQUE NOT NULL,
+        current_streak INTEGER NOT NULL DEFAULT 1,
+        longest_streak INTEGER NOT NULL DEFAULT 1,
+        last_claim_date TIMESTAMPTZ,
+        total_claimed INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS notification_settings (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER UNIQUE NOT NULL,
+        approved_alerts BOOLEAN NOT NULL DEFAULT true,
+        daily_summary BOOLEAN NOT NULL DEFAULT false,
+        streak_reminder BOOLEAN NOT NULL DEFAULT true,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    console.log("[PG] ✅ Schema ready");
+  }
+
+  // Users
+  async getUserByTelegramId(telegramId: string): Promise<User | undefined> {
+    const res = await this.pool.query("SELECT * FROM users WHERE telegram_id = $1", [telegramId]);
+    return res.rows[0] ? toUser(res.rows[0]) : undefined;
+  }
+
+  async createUser(user: InsertUser): Promise<User> {
+    const isAdmin = user.telegramId === ADMIN_TELEGRAM_ID;
+    const res = await this.pool.query(
+      `INSERT INTO users
+        (telegram_id, username, first_name, last_name, photo_url, credits, total_charged, total_rejected, is_admin, has_seen_tutorial, referral_code, referred_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING *`,
+      [
+        user.telegramId,
+        user.username ?? null,
+        user.firstName ?? null,
+        user.lastName ?? null,
+        user.photoUrl ?? null,
+        isAdmin ? 999999 : (user.credits || 0),
+        user.totalCharged || 0,
+        user.totalRejected || 0,
+        isAdmin,
+        user.hasSeenTutorial || false,
+        user.referralCode ?? null,
+        user.referredBy ?? null,
+      ],
+    );
+    return toUser(res.rows[0]);
+  }
+
+  async getOrCreateUser(user: InsertUser): Promise<User> {
+    const existing = await this.getUserByTelegramId(user.telegramId);
+    if (existing) return existing;
+    return this.createUser(user);
+  }
+
+  async updateUser(telegramId: string, data: Partial<InsertUser>): Promise<User | undefined> {
+    const sets: string[] = [];
+    const values: any[] = [];
+    const map: Record<string, string> = {
+      username: "username",
+      firstName: "first_name",
+      lastName: "last_name",
+      photoUrl: "photo_url",
+      credits: "credits",
+      totalCharged: "total_charged",
+      totalRejected: "total_rejected",
+      isAdmin: "is_admin",
+      hasSeenTutorial: "has_seen_tutorial",
+      referralCode: "referral_code",
+      referredBy: "referred_by",
+    };
+    for (const key of Object.keys(data)) {
+      const col = map[key];
+      if (!col) continue;
+      values.push((data as any)[key]);
+      sets.push(`${col} = $${values.length}`);
+    }
+    if (sets.length === 0) return undefined;
+    values.push(telegramId);
+    sets.push(`last_active_at = NOW()`);
+    const res = await this.pool.query(
+      `UPDATE users SET ${sets.join(", ")} WHERE telegram_id = $${values.length} RETURNING *`,
+      values,
+    );
+    return res.rows[0] ? toUser(res.rows[0]) : undefined;
+  }
+
+  async updateUserCredits(telegramId: string, amount: number): Promise<User | undefined> {
+    const res = await this.pool.query(
+      `UPDATE users SET credits = GREATEST(0, credits + $1), last_active_at = NOW()
+       WHERE telegram_id = $2 RETURNING *`,
+      [amount, telegramId],
+    );
+    return res.rows[0] ? toUser(res.rows[0]) : undefined;
+  }
+
+  async updateUserStats(telegramId: string, charged: number, rejected: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE users SET total_charged = total_charged + $1, total_rejected = total_rejected + $2, last_active_at = NOW()
+       WHERE telegram_id = $3`,
+      [charged, rejected, telegramId],
+    );
+  }
+
+  async markTutorialSeen(telegramId: string): Promise<User | undefined> {
+    const res = await this.pool.query(
+      `UPDATE users SET has_seen_tutorial = true, last_active_at = NOW() WHERE telegram_id = $1 RETURNING *`,
+      [telegramId],
+    );
+    return res.rows[0] ? toUser(res.rows[0]) : undefined;
+  }
+
+  // Sites
+  async getUserSites(userId: number): Promise<Site[]> {
+    const res = await this.pool.query(
+      "SELECT * FROM sites WHERE user_id = $1 ORDER BY created_at DESC",
+      [userId],
+    );
+    return res.rows.map(toSite);
+  }
+
+  async getActiveSite(userId: number): Promise<Site | undefined> {
+    const res = await this.pool.query(
+      "SELECT * FROM sites WHERE user_id = $1 AND is_active = true LIMIT 1",
+      [userId],
+    );
+    return res.rows[0] ? toSite(res.rows[0]) : undefined;
+  }
+
+  async getSiteById(id: number): Promise<Site | undefined> {
+    const res = await this.pool.query("SELECT * FROM sites WHERE id = $1", [id]);
+    return res.rows[0] ? toSite(res.rows[0]) : undefined;
+  }
+
+  async addSite(site: InsertSite): Promise<Site> {
+    const res = await this.pool.query(
+      `INSERT INTO sites (user_id, name, url, product_price, is_active)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [site.userId, site.name, site.url, site.productPrice ?? null, site.isActive || false],
+    );
+    return toSite(res.rows[0]);
+  }
+
+  async updateSite(id: number, data: Partial<InsertSite>): Promise<Site | undefined> {
+    const sets: string[] = [];
+    const values: any[] = [];
+    const map: Record<string, string> = {
+      name: "name",
+      url: "url",
+      productPrice: "product_price",
+      isActive: "is_active",
+    };
+    for (const key of Object.keys(data)) {
+      const col = map[key];
+      if (!col) continue;
+      values.push((data as any)[key]);
+      sets.push(`${col} = $${values.length}`);
+    }
+    if (sets.length === 0) return undefined;
+    values.push(id);
+    const res = await this.pool.query(
+      `UPDATE sites SET ${sets.join(", ")} WHERE id = $${values.length} RETURNING *`,
+      values,
+    );
+    return res.rows[0] ? toSite(res.rows[0]) : undefined;
+  }
+
+  async deleteSite(id: number): Promise<void> {
+    await this.pool.query("DELETE FROM sites WHERE id = $1", [id]);
+  }
+
+  async setActiveSite(userId: number, siteId: number): Promise<void> {
+    await this.pool.query("UPDATE sites SET is_active = false WHERE user_id = $1", [userId]);
+    await this.pool.query("UPDATE sites SET is_active = true WHERE id = $1 AND user_id = $2", [siteId, userId]);
+  }
+
+  async updateSitePrice(siteId: number, price: string): Promise<void> {
+    await this.pool.query("UPDATE sites SET product_price = $1 WHERE id = $2", [price, siteId]);
+  }
+
+  // Proxies
+  async getUserProxies(userId: number): Promise<Proxy[]> {
+    const res = await this.pool.query(
+      "SELECT * FROM proxies WHERE user_id = $1 ORDER BY created_at DESC",
+      [userId],
+    );
+    return res.rows.map(toProxy);
+  }
+
+  async addProxy(proxy: InsertProxy): Promise<Proxy> {
+    const res = await this.pool.query(
+      `INSERT INTO proxies (user_id, proxy, is_valid, last_checked)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [proxy.userId, proxy.proxy, proxy.isValid ?? true, proxy.lastChecked ?? null],
+    );
+    return toProxy(res.rows[0]);
+  }
+
+  async updateProxy(id: number, data: Partial<InsertProxy>): Promise<void> {
+    const sets: string[] = [];
+    const values: any[] = [];
+    const map: Record<string, string> = {
+      isValid: "is_valid",
+      lastChecked: "last_checked",
+    };
+    for (const key of Object.keys(data)) {
+      const col = map[key];
+      if (!col) continue;
+      values.push((data as any)[key]);
+      sets.push(`${col} = $${values.length}`);
+    }
+    if (sets.length === 0) return;
+    values.push(id);
+    await this.pool.query(`UPDATE proxies SET ${sets.join(", ")} WHERE id = $${values.length}`, values);
+  }
+
+  async deleteProxy(id: number): Promise<void> {
+    await this.pool.query("DELETE FROM proxies WHERE id = $1", [id]);
+  }
+
+  async deleteAllUserProxies(userId: number): Promise<void> {
+    await this.pool.query("DELETE FROM proxies WHERE user_id = $1", [userId]);
+  }
+
+  // Settings (global fallback)
+  async getSettings(): Promise<Settings | undefined> {
+    const res = await this.pool.query("SELECT * FROM settings ORDER BY id LIMIT 1");
+    return res.rows[0] ? toSettings(res.rows[0]) : undefined;
+  }
+
+  async updateSettings(newSettings: InsertSettings): Promise<Settings> {
+    const existing = await this.getSettings();
+    if (existing) {
+      const res = await this.pool.query(
+        `UPDATE settings SET
+          target_url = $1, proxy_list = $2, proxy_enabled = $3, updated_at = NOW()
+         WHERE id = $4 RETURNING *`,
+        [
+          newSettings.targetUrl ?? existing.targetUrl,
+          newSettings.proxyList ?? existing.proxyList,
+          newSettings.proxyEnabled ?? existing.proxyEnabled,
+          existing.id,
+        ],
+      );
+      return toSettings(res.rows[0]);
+    }
+    const res = await this.pool.query(
+      `INSERT INTO settings (target_url, proxy_list, proxy_enabled)
+       VALUES ($1,$2,$3) RETURNING *`,
+      [newSettings.targetUrl || "", newSettings.proxyList || "", newSettings.proxyEnabled ?? true],
+    );
+    return toSettings(res.rows[0]);
+  }
+
+  // Results
+  async addResult(result: { card: string; status: string; message?: string; userId?: number; sessionId?: string }): Promise<CheckResult> {
+    const res = await this.pool.query(
+      `INSERT INTO results (user_id, session_id, card, status, message)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [result.userId ?? null, result.sessionId ?? null, result.card, result.status, result.message ?? null],
+    );
+    return toResult(res.rows[0]);
+  }
+
+  async getResults(limit = 100, userId?: number): Promise<CheckResult[]> {
+    const params: any[] = [];
+    let where = "";
+    if (userId) {
+      params.push(userId);
+      where = "WHERE user_id = $1 ";
+    }
+    params.push(limit);
+    const res = await this.pool.query(
+      `SELECT * FROM results ${where}ORDER BY created_at DESC LIMIT $${params.length}`,
+      params,
+    );
+    return res.rows.map(toResult);
+  }
+
+  async clearResults(userId?: number): Promise<void> {
+    if (userId) {
+      await this.pool.query("DELETE FROM results WHERE user_id = $1", [userId]);
+    } else {
+      await this.pool.query("DELETE FROM results");
+    }
+  }
+
+  // Check Sessions
+  async createCheckSession(session: InsertCheckSession): Promise<CheckSession> {
+    const res = await this.pool.query(
+      `INSERT INTO check_sessions
+        (session_id, user_id, site_id, total_cards, processed_cards, charged_cards, rejected_cards, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [
+        session.sessionId,
+        session.userId,
+        session.siteId ?? null,
+        session.totalCards || 0,
+        session.processedCards || 0,
+        session.chargedCards || 0,
+        session.rejectedCards || 0,
+        session.status || "pending",
+      ],
+    );
+    return toCheckSession(res.rows[0]);
+  }
+
+  async updateCheckSession(sessionId: string, data: Partial<InsertCheckSession>): Promise<void> {
+    const sets: string[] = [];
+    const values: any[] = [];
+    const map: Record<string, string> = {
+      siteId: "site_id",
+      totalCards: "total_cards",
+      processedCards: "processed_cards",
+      chargedCards: "charged_cards",
+      rejectedCards: "rejected_cards",
+      status: "status",
+      completedAt: "completed_at",
+    };
+    for (const key of Object.keys(data)) {
+      const col = map[key];
+      if (!col) continue;
+      values.push((data as any)[key]);
+      sets.push(`${col} = $${values.length}`);
+    }
+    if (sets.length === 0) return;
+    values.push(sessionId);
+    await this.pool.query(
+      `UPDATE check_sessions SET ${sets.join(", ")} WHERE session_id = $${values.length}`,
+      values,
+    );
+  }
+
+  async getCheckSession(sessionId: string): Promise<CheckSession | undefined> {
+    const res = await this.pool.query("SELECT * FROM check_sessions WHERE session_id = $1", [sessionId]);
+    return res.rows[0] ? toCheckSession(res.rows[0]) : undefined;
+  }
+
+  // Credit Transactions
+  async addCreditTransaction(userId: number, amount: number, type: string, description?: string, adminId?: string): Promise<CreditTransaction> {
+    const res = await this.pool.query(
+      `INSERT INTO credit_transactions (user_id, amount, type, description, admin_id)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [userId, amount, type, description ?? null, adminId ?? null],
+    );
+    return toCreditTransaction(res.rows[0]);
+  }
+
+  async getCreditTransactions(userId: number, limit = 50): Promise<CreditTransaction[]> {
+    const res = await this.pool.query(
+      "SELECT * FROM credit_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+      [userId, limit],
+    );
+    return res.rows.map(toCreditTransaction);
+  }
+
+  // Global Stats & Leaderboard
+  async getGlobalStats(): Promise<{ totalCards: number; totalLive: number; totalDead: number; hitRate: number }> {
+    const res = await this.pool.query(
+      `SELECT COALESCE(SUM(total_charged),0) AS total_live, COALESCE(SUM(total_rejected),0) AS total_dead FROM users`,
+    );
+    const totalLive = Number(res.rows[0].total_live);
+    const totalDead = Number(res.rows[0].total_dead);
+    const totalCards = totalLive + totalDead;
+    const hitRate = totalCards > 0 ? (totalLive / totalCards) * 100 : 0;
+    return { totalCards, totalLive, totalDead, hitRate };
+  }
+
+  async getLeaderboard(limit = 10): Promise<Array<{ userId: number; username: string | null; firstName: string | null; lastName: string | null; photoUrl: string | null; totalCharged: number; rank: number }>> {
+    const res = await this.pool.query(
+      `SELECT id, username, first_name, last_name, photo_url, total_charged,
+              ROW_NUMBER() OVER (ORDER BY total_charged DESC) AS rank
+       FROM users ORDER BY total_charged DESC LIMIT $1`,
+      [limit],
+    );
+    return res.rows.map((r: any) => ({
+      userId: r.id,
+      username: r.username ?? null,
+      firstName: r.first_name ?? null,
+      lastName: r.last_name ?? null,
+      photoUrl: r.photo_url ?? null,
+      totalCharged: r.total_charged,
+      rank: Number(r.rank),
+    }));
+  }
+
+  // Referrals
+  async getUserByReferralCode(code: string): Promise<User | undefined> {
+    const res = await this.pool.query("SELECT * FROM users WHERE referral_code = $1", [code]);
+    return res.rows[0] ? toUser(res.rows[0]) : undefined;
+  }
+
+  async createReferral(referrerId: number, referredId: number, code: string): Promise<Referral> {
+    const res = await this.pool.query(
+      `INSERT INTO referrals (referrer_id, referred_id, referral_code, credits_awarded)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [referrerId, referredId, code, 100],
+    );
+    return toReferral(res.rows[0]);
+  }
+
+  async getReferralsByUser(userId: number): Promise<Referral[]> {
+    const res = await this.pool.query(
+      "SELECT * FROM referrals WHERE referrer_id = $1 ORDER BY created_at DESC",
+      [userId],
+    );
+    return res.rows.map(toReferral);
+  }
+
+  async getReferralCount(userId: number): Promise<number> {
+    const res = await this.pool.query("SELECT COUNT(*) AS count FROM referrals WHERE referrer_id = $1", [userId]);
+    return Number(res.rows[0].count);
+  }
+
+  async generateReferralCode(userId: number): Promise<string> {
+    const check = await this.pool.query("SELECT referral_code FROM users WHERE id = $1", [userId]);
+    if (check.rows[0]?.referral_code) return check.rows[0].referral_code;
+    const code = "NX" + Math.random().toString(36).substring(2, 8).toUpperCase();
+    await this.pool.query("UPDATE users SET referral_code = $1 WHERE id = $2", [code, userId]);
+    return code;
+  }
+
+  // Daily Spin
+  async getLastSpin(userId: number): Promise<DailySpin | undefined> {
+    const res = await this.pool.query(
+      "SELECT * FROM daily_spins WHERE user_id = $1 ORDER BY spin_date DESC LIMIT 1",
+      [userId],
+    );
+    return res.rows[0] ? toDailySpin(res.rows[0]) : undefined;
+  }
+
+  async canSpinToday(userId: number): Promise<boolean> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const res = await this.pool.query(
+      "SELECT EXISTS(SELECT 1 FROM daily_spins WHERE user_id = $1 AND spin_date >= $2) AS spun",
+      [userId, today],
+    );
+    return !res.rows[0].spun;
+  }
+
+  async recordSpin(userId: number, creditsWon: number): Promise<DailySpin> {
+    const res = await this.pool.query(
+      "INSERT INTO daily_spins (user_id, credits_won) VALUES ($1,$2) RETURNING *",
+      [userId, creditsWon],
+    );
+    return toDailySpin(res.rows[0]);
+  }
+
+  // Daily Streak
+  async getStreak(userId: number): Promise<DailyStreak | undefined> {
+    const res = await this.pool.query("SELECT * FROM daily_streaks WHERE user_id = $1", [userId]);
+    return res.rows[0] ? toDailyStreak(res.rows[0]) : undefined;
+  }
+
+  async claimStreak(userId: number): Promise<{ streak: DailyStreak; reward: number; canClaim: boolean }> {
+    const streakRewards: { [key: number]: number } = {
+      1: 30, 2: 30, 3: 45, 4: 45, 5: 45, 6: 45, 7: 70,
+      8: 70, 9: 70, 10: 70, 11: 70, 12: 70, 13: 70, 14: 110,
+      15: 110, 16: 110, 17: 110, 18: 110, 19: 110, 20: 110,
+      21: 110, 22: 110, 23: 110, 24: 110, 25: 110, 26: 110,
+      27: 110, 28: 110, 29: 110, 30: 210,
+    };
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const existing = await this.getStreak(userId);
+
+    if (!existing) {
+      const res = await this.pool.query(
+        `INSERT INTO daily_streaks (user_id, current_streak, longest_streak, last_claim_date, total_claimed)
+         VALUES ($1, 1, 1, $2, 1) RETURNING *`,
+        [userId, now],
+      );
+      const streak = toDailyStreak(res.rows[0]);
+      return { streak, reward: streakRewards[1] || 30, canClaim: true };
+    }
+
+    const lastClaim = existing.lastClaimDate ? new Date(existing.lastClaimDate) : null;
+    const lastClaimDate = lastClaim ? new Date(lastClaim.getFullYear(), lastClaim.getMonth(), lastClaim.getDate()) : null;
+
+    if (lastClaimDate && lastClaimDate.getTime() === today.getTime()) {
+      return { streak: existing, reward: 0, canClaim: false };
+    }
+
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    let newStreakValue = 1;
+    if (lastClaimDate && lastClaimDate.getTime() === yesterday.getTime()) {
+      newStreakValue = Math.min(existing.currentStreak + 1, 30);
+    }
+
+    const reward = streakRewards[newStreakValue] || 30;
+    const longestStreak = Math.max(existing.longestStreak, newStreakValue);
+
+    const res = await this.pool.query(
+      `UPDATE daily_streaks SET current_streak = $1, longest_streak = $2, last_claim_date = $3, total_claimed = total_claimed + 1
+       WHERE user_id = $4 RETURNING *`,
+      [newStreakValue, longestStreak, now, userId],
+    );
+    const streak = toDailyStreak(res.rows[0]);
+    return { streak, reward, canClaim: true };
+  }
+
+  // Notification Settings
+  async getNotificationSettings(userId: number): Promise<NotificationSettings | undefined> {
+    const res = await this.pool.query("SELECT * FROM notification_settings WHERE user_id = $1", [userId]);
+    return res.rows[0] ? toNotificationSettings(res.rows[0]) : undefined;
+  }
+
+  async updateNotificationSettings(userId: number, newSettings: Partial<NotificationSettings>): Promise<NotificationSettings> {
+    const existing = await this.getNotificationSettings(userId);
+    if (existing) {
+      const res = await this.pool.query(
+        `UPDATE notification_settings SET
+          approved_alerts = $1, daily_summary = $2, streak_reminder = $3, updated_at = NOW()
+         WHERE user_id = $4 RETURNING *`,
+        [
+          newSettings.approvedAlerts ?? existing.approvedAlerts,
+          newSettings.dailySummary ?? existing.dailySummary,
+          newSettings.streakReminder ?? existing.streakReminder,
+          userId,
+        ],
+      );
+      return toNotificationSettings(res.rows[0]);
+    }
+    const res = await this.pool.query(
+      `INSERT INTO notification_settings (user_id, approved_alerts, daily_summary, streak_reminder)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [userId, newSettings.approvedAlerts ?? true, newSettings.dailySummary ?? false, newSettings.streakReminder ?? true],
+    );
+    return toNotificationSettings(res.rows[0]);
+  }
+}
+
+export const storage: IStorage = process.env.DATABASE_URL
+  ? new PostgresStorage(process.env.DATABASE_URL)
+  : new FileStorage();

@@ -1,10 +1,10 @@
 /**
  * Proxy Checker - فحص الـ proxies بشكل حقيقي
- * Version 2: Fixed import and working properly
+ * Version 3: raw TCP implementation using net.Socket
+ * No external agent dependencies -> runs on Node 18 (Railway) without ESM require issues
  */
 
-import * as http from 'http';
-import { HttpProxyAgent } from 'http-proxy-agent';
+import * as net from "net";
 
 interface ProxyCheckResult {
   isValid: boolean;
@@ -26,186 +26,165 @@ function parseProxyString(proxyStr: string): {
   error?: string;
 } {
   try {
-    const parts = proxyStr.split(':');
-    
+    const parts = proxyStr.split(":");
+
     if (parts.length < 2) {
-      return { 
-        host: '', 
-        port: 0, 
-        error: 'Invalid format. Expected IP:PORT or IP:PORT:username:password' 
+      return {
+        host: "",
+        port: 0,
+        error: "Invalid format. Expected IP:PORT or IP:PORT:username:password",
       };
     }
-    
+
     const host = parts[0].trim();
     const portStr = parts[1].trim();
     const port = parseInt(portStr, 10);
-    
+
     if (!host || isNaN(port) || port < 1 || port > 65535) {
-      return { 
-        host: '', 
-        port: 0, 
-        error: `Invalid IP or port. Host="${host}", Port=${port}` 
+      return {
+        host: "",
+        port: 0,
+        error: `Invalid IP or port. Host="${host}", Port=${port}`,
       };
     }
-    
+
     let username: string | undefined;
     let password: string | undefined;
-    
+
     if (parts.length >= 4) {
       username = parts[2].trim();
       password = parts[3].trim();
     }
-    
+
     return { host, port, username, password };
   } catch (error: any) {
-    return { 
-      host: '', 
-      port: 0, 
-      error: `Parse error: ${error.message}` 
+    return {
+      host: "",
+      port: 0,
+      error: `Parse error: ${error.message}`,
     };
   }
 }
 
 /**
- * فحص الـ proxy بإرسال طلب عبره
+ * فحص الـ proxy بإرسال طلب HTTP عبره (طريقة proxy request بصيغة absolute-URI)
  */
 export async function checkProxyValidity(
-  proxyStr: string, 
-  timeout: number = 10000
+  proxyStr: string,
+  timeout: number = 10000,
 ): Promise<ProxyCheckResult> {
   console.log(`[PROXY] Testing: ${proxyStr}`);
-  
+
   try {
     const parsed = parseProxyString(proxyStr);
-    
+
     if (parsed.error) {
       console.log(`[PROXY] ❌ Parse error: ${parsed.error}`);
-      return { 
-        isValid: false, 
+      return {
+        isValid: false,
         error: parsed.error,
-        type: 'unknown'
+        type: "unknown",
       };
     }
-    
+
     const { host, port, username, password } = parsed;
-    
-    let proxyUrl: string;
-    let displayUrl: string;
-    
-    if (username && password) {
-      proxyUrl = `http://${username}:${password}@${host}:${port}`;
-      displayUrl = `http://${username}:****@${host}:${port}`;
-      console.log(`[PROXY] Using authenticated proxy: ${displayUrl}`);
-    } else {
-      proxyUrl = `http://${host}:${port}`;
-      displayUrl = proxyUrl;
-      console.log(`[PROXY] Using basic proxy: ${displayUrl}`);
-    }
-    
     const start = Date.now();
-    
+
     return new Promise((resolve) => {
+      const socket = new net.Socket();
+      let settled = false;
+      let buffer = "";
+
+      const finish = (result: ProxyCheckResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        socket.destroy();
+        resolve(result);
+      };
+
       const timeoutId = setTimeout(() => {
         console.log(`[PROXY] ❌ Timeout after ${timeout}ms`);
-        resolve({ 
-          isValid: false, 
-          error: 'Timeout',
-          type: 'http'
+        finish({
+          isValid: false,
+          error: "Timeout",
+          type: "http",
         });
       }, timeout);
-      
-      try {
-        console.log(`[PROXY] Creating agent and sending request...`);
-        
-        const agent = new HttpProxyAgent(proxyUrl);
-        
-        const options = {
-          hostname: 'httpbin.org',
-          path: '/ip',
-          method: 'GET',
-          agent: agent,
-          timeout: Math.max(timeout - 1000, 5000),
-          headers: {
-            'User-Agent': 'ProxyChecker/1.0'
+
+      socket.setTimeout(Math.max(timeout - 1000, 5000));
+
+      socket.on("connect", () => {
+        const authHeader =
+          username && password
+            ? `Proxy-Authorization: Basic ${Buffer.from(
+                `${username}:${password}`,
+              ).toString("base64")}\r\n`
+            : "";
+        socket.write(
+          `GET http://httpbin.org/ip HTTP/1.1\r\n` +
+            `Host: httpbin.org\r\n` +
+            authHeader +
+            `Connection: close\r\n\r\n`,
+        );
+      });
+
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+      });
+
+      socket.on("close", () => {
+        if (settled) return;
+        const latency = Date.now() - start;
+        const match = buffer.match(/^HTTP\/1\.[01] (\d{3})/);
+        const status = match ? parseInt(match[1], 10) : 0;
+
+        if (status === 200) {
+          let ip1: string | undefined;
+          try {
+            const idx = buffer.indexOf("\r\n\r\n");
+            const body = idx >= 0 ? buffer.slice(idx + 4) : buffer;
+            ip1 = JSON.parse(body.trim()).origin;
+          } catch (e) {
+            // ignore body parse errors
           }
-        };
-        
-        const req = http.request(options, (res) => {
-          clearTimeout(timeoutId);
-          
-          const latency = Date.now() - start;
-          console.log(`[PROXY] Response: ${res.statusCode} (${latency}ms)`);
-          
-          let data = '';
-          res.on('data', chunk => {
-            data += chunk;
+          console.log(`[PROXY] ✅ Valid: ${proxyStr} (${latency}ms) ip=${ip1}`);
+          finish({ isValid: true, latency, type: "http", ip1 });
+        } else if (buffer) {
+          console.log(`[PROXY] ❌ Invalid HTTP response ${status}`);
+          finish({
+            isValid: false,
+            error: `HTTP ${status || "bad response"}`,
+            type: "http",
           });
-          
-          res.on('end', () => {
-            if (res.statusCode === 200) {
-              let ip1: string | undefined;
-              try {
-                const parsed = JSON.parse(data);
-                ip1 = parsed.origin;
-              } catch (e) {
-                ip1 = data.trim() || undefined;
-              }
-              console.log(`[PROXY] ✅ Valid: ${proxyStr} (${latency}ms) ip=${ip1}`);
-              resolve({ 
-                isValid: true, 
-                latency,
-                type: 'http',
-                ip1
-              });
-            } else {
-              console.log(`[PROXY] ❌ Invalid HTTP ${res.statusCode}`);
-              resolve({ 
-                isValid: false, 
-                error: `HTTP ${res.statusCode}`,
-                type: 'http'
-              });
-            }
-          });
+        } else {
+          console.log(`[PROXY] ❌ Connection closed without response (${latency}ms)`);
+          finish({ isValid: false, error: "Connection closed", type: "http" });
+        }
+      });
+
+      socket.on("timeout", () => {
+        console.log(`[PROXY] ❌ Socket timeout`);
+        finish({ isValid: false, error: "Request timeout", type: "http" });
+      });
+
+      socket.on("error", (error: any) => {
+        console.log(`[PROXY] ❌ Error: ${error.code} - ${error.message}`);
+        finish({
+          isValid: false,
+          error: error.message || "Connection error",
+          type: "http",
         });
-        
-        req.on('error', (error: any) => {
-          clearTimeout(timeoutId);
-          console.log(`[PROXY] ❌ Error: ${error.code} - ${error.message}`);
-          resolve({ 
-            isValid: false, 
-            error: error.message || 'Connection error',
-            type: 'http'
-          });
-        });
-        
-        req.on('timeout', () => {
-          clearTimeout(timeoutId);
-          req.destroy();
-          console.log(`[PROXY] ❌ Timeout`);
-          resolve({ 
-            isValid: false, 
-            error: 'Request timeout',
-            type: 'http'
-          });
-        });
-        
-        req.end();
-      } catch (error: any) {
-        clearTimeout(timeoutId);
-        console.log(`[PROXY] ❌ Exception: ${error.message}`);
-        resolve({ 
-          isValid: false, 
-          error: error.message,
-          type: 'unknown'
-        });
-      }
+      });
+
+      socket.connect(port, host);
     });
   } catch (error: any) {
     console.error(`[PROXY] ❌ Unexpected error: ${error.message}`);
-    return { 
-      isValid: false, 
+    return {
+      isValid: false,
       error: error.message,
-      type: 'unknown'
+      type: "unknown",
     };
   }
 }
@@ -215,17 +194,19 @@ export async function checkProxyValidity(
  */
 export async function checkMultipleProxies(proxies: string[]): Promise<Map<string, ProxyCheckResult>> {
   const results = new Map<string, ProxyCheckResult>();
-  
-  const checks = proxies.map(proxy => 
+
+  const checks = proxies.map((proxy) =>
     checkProxyValidity(proxy)
-      .then(result => results.set(proxy, result))
-      .catch(error => results.set(proxy, { 
-        isValid: false, 
-        error: error.message,
-        type: 'unknown'
-      }))
+      .then((result) => results.set(proxy, result))
+      .catch((error) =>
+        results.set(proxy, {
+          isValid: false,
+          error: error.message,
+          type: "unknown",
+        }),
+      ),
   );
-  
+
   await Promise.all(checks);
   return results;
 }

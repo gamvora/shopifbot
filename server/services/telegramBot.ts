@@ -29,6 +29,8 @@ interface TelegramUpdate {
 const processedUpdates = new Set<number>();
 const MAX_PROCESSED_UPDATES = 1000;
 let botInitialized = false;
+let pollingActive = false;
+let pollingStartTime = 0;
 
 function cleanupProcessedUpdates() {
   if (processedUpdates.size > MAX_PROCESSED_UPDATES) {
@@ -405,7 +407,6 @@ async function sendMessageWithButton(chatId: number | string, text: string, butt
   }
 }
 
-let pollingActive = false;
 let lastUpdateId = 0;
 
 async function getUpdates(): Promise<TelegramUpdate[]> {
@@ -419,6 +420,8 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
     if (!data.ok) {
       if (data.error_code === 401) {
         console.error('[BOT] ❌ CRITICAL: Invalid Bot Token! Check TELEGRAM_BOT_TOKEN environment variable.');
+      } else if (data.error_code === 409) {
+        console.error(`[BOT] ❌ Conflict: ${data.description}`);
       } else {
         console.error(`[BOT] ❌ Error getting updates: ${data.description}`);
       }
@@ -437,12 +440,13 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
 
 function startPolling(): void {
   if (pollingActive) {
-    console.log('[BOT] Polling already active');
+    console.log('[BOT] Polling already active, skipping');
     return;
   }
 
   console.log('[BOT] ✅ Starting Polling mode (checking for updates every 30 seconds)');
   pollingActive = true;
+  pollingStartTime = Date.now();
   
   const poll = async () => {
     while (pollingActive) {
@@ -513,5 +517,13 @@ export async function deleteWebhook(): Promise<boolean> {
 export function stopPolling(): void {
   pollingActive = false;
   console.log('[BOT] Polling stopped');
+}
+
+export function getPollingStatus() {
+  return {
+    active: pollingActive,
+    startTime: pollingStartTime,
+    uptime: pollingActive ? Date.now() - pollingStartTime : 0
+  };
 }
 

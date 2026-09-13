@@ -831,8 +831,11 @@ export async function registerRoutes(
       if (target === null) {
         return res.status(403).json({ error: 'Access denied' });
       }
-      const { name, url } = req.body;
-      const site = await storage.updateSite(id, { name, url });
+const { name, url } = req.body;
+        const update: Record<string, any> = {};
+        if (name !== undefined && name !== null) update.name = name;
+        if (url !== undefined && url !== null) update.url = url;
+        const site = await storage.updateSite(id, update);
       res.json(site);
     } catch (e: any) {
       res.status(400).json({ error: e.message });

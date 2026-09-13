@@ -282,8 +282,10 @@ export default function Settings() {
       });
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
+    onSuccess: (data: any) => {
+      queryClient.setQueryData(['/api/sites'], (old: Site[] | undefined) => 
+        old?.map(s => s.id === data.id ? { ...s, ...data } : s)
+      );
       setEditingSiteId(null);
       setEditingSiteName('');
       toast({ title: 'Site renamed', soundType: 'success' });

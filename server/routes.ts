@@ -253,6 +253,7 @@ export async function registerRoutes(
         /credit_card_generic/,
         /generic_error/,
         /total_exceeds_limit/,
+        /payments_positive_amount_expected/,
       ];
       const isDeclined = !isHardError && DECLINED_RE.some((re) => re.test(apiMsg));
 

@@ -47,6 +47,7 @@ import {
   Search,
   Pin,
   Pencil,
+  Square,
 } from 'lucide-react';
 import { Link } from 'wouter';
 
@@ -113,6 +114,7 @@ interface BulkVerifySummary {
   working: number;
   failed: number;
   invalid: Array<{ url: string; error: string }>;
+  stopped?: boolean;
 }
 
 interface BulkProxyTestItem {
@@ -345,7 +347,9 @@ export default function Settings() {
     onSuccess: (data) => {
       setBulkVerifyResults(data.results || []);
       setBulkVerifySummary(data.summary || null);
-      if (data.results?.some((r) => r.ok)) {
+      if (data.summary?.stopped) {
+        toast({ title: `Verification stopped — ${data.summary.working} working / ${data.summary.total} checked`, soundType: 'success' });
+      } else if (data.results?.some((r) => r.ok)) {
         toast({ title: `${data.summary?.working || 0} sites working`, description: `${data.summary?.failed || 0} failed`, soundType: 'success' });
       } else {
         toast({ title: 'No working sites', description: 'All stores failed the check', variant: 'destructive' });
@@ -353,6 +357,20 @@ export default function Settings() {
     },
     onError: (error) => {
       toast({ title: 'Bulk verification failed', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  const stopBulkVerifyMutation = useMutation({
+    mutationFn: async () => {
+      const res = await authFetch('/api/admin/sites/verify-bulk/stop', { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to stop');
+      }
+      return res.json();
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to stop verification', description: error.message, variant: 'destructive' });
     },
   });
 
@@ -696,16 +714,29 @@ export default function Settings() {
               {(verifyBulkSitesMutation.isPending || bulkVerifyResults.length > 0) && (
                 <div className="mb-4">
                   {verifyBulkSitesMutation.isPending && (
-                    <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
-                      <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
-                      Verifying sites (parallel){bulkVerifyDone > 0 ? ` — ${workingSitesCount} working / ${bulkVerifyDone} checked` : ''}...
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                        Verifying sites (parallel){bulkVerifyDone > 0 ? ` — ${workingSitesCount} working / ${bulkVerifyDone} checked` : ''}...
+                      </div>
+                      <Button
+                        onClick={() => stopBulkVerifyMutation.mutate()}
+                        disabled={stopBulkVerifyMutation.isPending}
+                        variant="outline"
+                        size="sm"
+                        className="rounded-xl text-rose-500 border-rose-300 dark:border-rose-500/40 hover:bg-rose-500/10 flex-shrink-0"
+                        data-testid="button-stop-verify-sites"
+                      >
+                        <Square className="w-4 h-4 mr-1" />
+                        {stopBulkVerifyMutation.isPending ? 'Stopping...' : 'Stop'}
+                      </Button>
                     </div>
                   )}
                   {bulkVerifySummary && (
                     <div className="p-3 rounded-2xl mb-3 bg-white/60 dark:bg-slate-800/60 border border-amber-200/60 dark:border-amber-500/30 space-y-1 text-sm">
                       <div className="flex items-center gap-2 font-bold">
                         <Activity className="w-4 h-4 text-amber-500" />
-                        <span>Verification complete</span>
+                        <span>{bulkVerifySummary.stopped ? 'Stopped' : 'Verification complete'}</span>
                         <span className="ml-auto font-mono text-xs">{bulkVerifySummary.total} checked</span>
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -717,67 +748,92 @@ export default function Settings() {
                       </div>
                     </div>
                   )}
-                  {bulkVerifyResults.length > 0 && (
-                    <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
-                      {bulkVerifyResults.map((r, i) => (
-                        <motion.div
-                          key={`${r.url}-${i}`}
-                          initial={{ opacity: 0, x: -10 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          className={`p-3 rounded-2xl border text-sm ${
-                            r.siteWorks
-                              ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30'
-                              : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/30'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2 mb-1">
-                            {r.siteWorks ? (
-                              <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                            ) : (
-                              <XCircle className="w-4 h-4 text-rose-500 flex-shrink-0" />
-                            )}
-                            <span className="font-mono text-xs truncate flex-1">{r.url}</span>
-                            <span className="text-[10px] text-muted-foreground flex-shrink-0">{Math.round(r.elapsed / 1000)}s</span>
+                  {(() => {
+                    const workingSites = bulkVerifyResults.filter(r => r.ok);
+                    const failedSites = bulkVerifyResults.filter(r => !r.ok);
+                    return (
+                      <>
+                        {workingSites.length > 0 && (
+                          <div className="mb-3">
+                            <div className="flex items-center gap-2 mb-2">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                              <span className="text-sm font-bold text-emerald-600 dark:text-emerald-400">Working ({workingSites.length})</span>
+                            </div>
+                            <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
+                              {workingSites.map((r, i) => (
+                                <motion.div
+                                  key={`ok-${r.url}-${i}`}
+                                  initial={{ opacity: 0, x: -10 }}
+                                  animate={{ opacity: 1, x: 0 }}
+                                  className="p-3 rounded-2xl border text-sm bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30"
+                                >
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                                    <span className="font-mono text-xs truncate flex-1">{r.url}</span>
+                                    <span className="text-[10px] text-muted-foreground flex-shrink-0">{Math.round(r.elapsed / 1000)}s</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+                                    <Globe className="w-3 h-3 text-blue-500" />
+                                    <span className="truncate flex-1">{r.productTitle}</span>
+                                    {r.productPrice && (
+                                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-500 font-mono text-[10px]">{r.productPrice}</span>
+                                    )}
+                                  </div>
+                                  {r.gatewayReply && (
+                                    <p className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400 mb-2">
+                                      {r.gatewayReply}
+                                      {r.gatewayPrice && <span className="ml-2 text-emerald-500/80">{r.gatewayPrice}</span>}
+                                    </p>
+                                  )}
+                                  <Button
+                                    onClick={() => addGlobalSiteMutation.mutate({
+                                      url: r.url,
+                                      name: adminSiteName.trim() || undefined,
+                                      productPrice: r.productPrice,
+                                    })}
+                                    disabled={addGlobalSiteMutation.isPending}
+                                    className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold border-0"
+                                    size="sm"
+                                    data-testid={`button-add-global-site-${i}`}
+                                  >
+                                    <Pin className="w-4 h-4 mr-1" />
+                                    Add as Global Site
+                                  </Button>
+                                </motion.div>
+                              ))}
+                            </div>
                           </div>
-                          {r.siteWorks ? (
-                            <>
-                              <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-                                <Globe className="w-3 h-3 text-blue-500" />
-                                <span className="truncate flex-1">{r.productTitle}</span>
-                                {r.productPrice && (
-                                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-500 font-mono text-[10px]">{r.productPrice}</span>
-                                )}
-                              </div>
-                              {r.gatewayReply && (
-                                <p className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400 mb-2">
-                                  {r.gatewayReply}
-                                  {r.gatewayPrice && <span className="ml-2 text-emerald-500/80">{r.gatewayPrice}</span>}
-                                </p>
-                              )}
-                              <Button
-                                onClick={() => addGlobalSiteMutation.mutate({
-                                  url: r.url,
-                                  name: adminSiteName.trim() || undefined,
-                                  productPrice: r.productPrice,
-                                })}
-                                disabled={addGlobalSiteMutation.isPending}
-                                className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold border-0"
-                                size="sm"
-                                data-testid={`button-add-global-site-${i}`}
-                              >
-                                <Pin className="w-4 h-4 mr-1" />
-                                Add as Global Site
-                              </Button>
-                            </>
-                          ) : (
-                            <p className="font-mono text-xs text-rose-600 dark:text-rose-400 text-xs">
-                              {r.gatewayError || r.siteError || 'No reply (timeout/blocked)'}
-                            </p>
-                          )}
-                        </motion.div>
-                      ))}
-                    </div>
-                  )}
+                        )}
+                        {failedSites.length > 0 && (
+                          <div>
+                            <div className="flex items-center gap-2 mb-2">
+                              <XCircle className="w-4 h-4 text-rose-500" />
+                              <span className="text-sm font-bold text-rose-600 dark:text-rose-400">Not working ({failedSites.length})</span>
+                            </div>
+                            <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
+                              {failedSites.map((r, i) => (
+                                <motion.div
+                                  key={`bad-${r.url}-${i}`}
+                                  initial={{ opacity: 0, x: -10 }}
+                                  animate={{ opacity: 1, x: 0 }}
+                                  className="p-3 rounded-2xl border text-sm bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/30"
+                                >
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <XCircle className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                                    <span className="font-mono text-xs truncate flex-1">{r.url}</span>
+                                    <span className="text-[10px] text-muted-foreground flex-shrink-0">{Math.round(r.elapsed / 1000)}s</span>
+                                  </div>
+                                  <p className="font-mono text-xs text-rose-600 dark:text-rose-400">
+                                    {r.gatewayError || r.siteError || 'No reply (timeout/blocked)'}
+                                  </p>
+                                </motion.div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                   {bulkVerifyResults.length > 0 && workingSitesCount > 0 && !verifyBulkSitesMutation.isPending && (
                     <Button
                       onClick={() => addAllWorkingSitesMutation.mutate(bulkVerifyResults)}

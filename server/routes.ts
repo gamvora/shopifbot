@@ -210,25 +210,38 @@ export async function registerRoutes(
       const apiMsg = String(data.Response || data.Status || '').toLowerCase();
 
       // Hard errors: the check itself failed (retryable), not a card decision
-      const HARD_ERROR_HINTS = [
-        'could not extract queuetoken',
-        'cloudflare_challenge',
-        'captcha',
-        'request blocked',
-        'access denied',
-        'connection refused',
-        'bad gateway',
-        'service unavailable',
-        'api error',
-        'internal server error',
+      const HARD_ERROR_RE = [
+        /exceeded \d+ poll attempts/,
+        /could not extract/,
+        /step \d+ failed/,
+        /inventoryreservationfailure/,
+        /cloudflare_challenge/,
+        /playwright/,
+        /bypass failed/,
+        /captcha/,
+        /request blocked/,
+        /access denied/,
+        /connection refused/,
+        /bad gateway/,
+        /service unavailable/,
+        /api error/,
+        /internal server error/,
       ];
-      const isHardError = !apiMsg || HARD_ERROR_HINTS.some((h) => apiMsg.includes(h));
+      const isHardError = !apiMsg || HARD_ERROR_RE.some((re) => re.test(apiMsg));
 
-      // Any reply that isn't "card_declined" and isn't a hard error => charged
+      const DECLINED_RE = [
+        /card_declined/,
+        /declined/,
+        /payments_credit_card_generic/,
+        /credit_card_generic/,
+      ];
+      const isDeclined = !isHardError && DECLINED_RE.some((re) => re.test(apiMsg));
+
+      // Any reply that isn't a decline and isn't a hard error => charged
       let status: string;
       if (isHardError) {
         status = 'error';
-      } else if (apiMsg.includes('card_declined') || apiMsg.includes('declined')) {
+      } else if (isDeclined) {
         status = 'dead';
       } else {
         status = 'live';
@@ -349,7 +362,7 @@ export async function registerRoutes(
 
         // Process valid card with API - retry up to 4 attempts on any error
         try {
-          const MAX_ATTEMPTS = 4;
+          const MAX_ATTEMPTS = 40;
           let attempt = 0;
           let result: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
 
@@ -598,7 +611,7 @@ export async function registerRoutes(
   // Hit the gateway with a test card; retries up to 3 times on error, rotating proxies
   const testGatewayWithRetries = async (origin: string, proxies: string[], onLog: (msg: string) => void) => {
     const testCard = '4111111111111111|12|29|123';
-    const MAX_ATTEMPTS = 3;
+    const MAX_ATTEMPTS = 12;
     let last: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const proxy = proxies.length ? proxies[(attempt - 1) % proxies.length] : '';

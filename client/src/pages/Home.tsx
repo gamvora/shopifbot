@@ -935,7 +935,7 @@ export default function Home() {
                       <p className={`text-sm font-bold ${
                         result.status === 'live' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
                       }`}>
-                        {result.status === 'live' ? 'LIVE' : (result.message || 'DECLINED')}
+                        {result.status === 'live' ? (result.message || 'LIVE') : (result.message || 'DECLINED')}
                       </p>
                     </div>
                     <motion.button

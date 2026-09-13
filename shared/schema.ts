@@ -248,6 +248,7 @@ export const WS_EVENTS = {
   LOG: 'log',
   CREDITS_UPDATE: 'credits_update',
   SESSION_UPDATE: 'session_update',
+  SITE_VERIFY: 'site_verify',
 } as const;
 
 export interface CheckJobRequest {

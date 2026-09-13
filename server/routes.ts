@@ -163,7 +163,7 @@ export async function registerRoutes(
     broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: '⛔ Check stopped by user', type: 'info' } });
   };
 
-  const checkCardWithAPI = async (card: string, siteUrl: string, proxy: string, onLog: (msg: string) => void, stopSignal?: AbortSignal): Promise<{status: string, message: string, price?: string, gateway?: string}> => {
+  const checkCardWithAPI = async (card: string, siteUrl: string, proxy: string, onLog: (msg: string) => void, stopSignal?: AbortSignal, timeoutMs?: number): Promise<{status: string, message: string, price?: string, gateway?: string}> => {
     const cardPrefix = card.substring(0, 6);
 
     if (stopSignal?.aborted) {
@@ -188,7 +188,7 @@ export async function registerRoutes(
       if (stopSignal) {
         stopSignal.addEventListener('abort', onStop, { once: true });
       }
-      const timeout = setTimeout(() => controller.abort(), 120000);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs ?? 120000);
 
       let response: Awaited<ReturnType<typeof fetch>>;
       try {
@@ -616,20 +616,20 @@ export async function registerRoutes(
     }
   };
 
-  // Hit the gateway with a test card; retries up to 3 times on error, rotating proxies
-  const testGatewayWithRetries = async (origin: string, proxies: string[], onLog: (msg: string) => void) => {
+  // Hit the gateway with a test card; retries up to 5 times on error, rotating proxies
+  const testGatewayWithRetries = async (origin: string, proxies: string[], onLog: (msg: string) => void, attemptTimeoutMs: number = 15000) => {
     const testCard = '4111111111111111|12|29|123';
-    const MAX_ATTEMPTS = 12;
+    const MAX_ATTEMPTS = 5;
     let last: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const proxy = proxies.length ? proxies[(attempt - 1) % proxies.length] : '';
-      last = await checkCardWithAPI(testCard, origin, proxy, onLog);
+      last = await checkCardWithAPI(testCard, origin, proxy, onLog, undefined, attemptTimeoutMs);
       if (last.status !== 'error') {
         return last;
       }
       if (attempt < MAX_ATTEMPTS) {
         onLog(`Gateway attempt ${attempt} error (${last.message}) - retrying (${attempt + 1}/${MAX_ATTEMPTS})...`);
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
     return last!;
@@ -717,31 +717,45 @@ export async function registerRoutes(
     const results: any[] = [];
     let workingCount = 0;
     const total = normalizedUrls.length;
+    const CONCURRENCY = 12;
 
-    for (let i = 0; i < total; i++) {
-      const origin = normalizedUrls[i];
-      const started = Date.now();
-      broadcastToUser(req.user!.id, {
-        type: WS_EVENTS.LOG,
-        payload: { message: `Verifying site ${i + 1}/${total}: ${origin}...`, type: 'info' },
-      });
+    let nextIndex = 0;
+    const worker = async () => {
+      while (nextIndex < total) {
+        const i = nextIndex++;
+        if (i >= total) break;
+        const origin = normalizedUrls[i];
+        const started = Date.now();
+        broadcastToUser(req.user!.id, {
+          type: WS_EVENTS.LOG,
+          payload: { message: `Verifying site ${i + 1}/${total}: ${origin}...`, type: 'info' },
+        });
 
-      const shop = await fetchShopDetails(origin);
-      const gateway = await testGatewayWithRetries(origin, proxies, () => {});
-      const result = await buildSiteVerifyResult(origin, shop, gateway, started);
-      if (result.siteWorks) {
-        workingCount++;
+        const shop = await fetchShopDetails(origin);
+        const gateway = await testGatewayWithRetries(origin, proxies, () => {}, 15000);
+        const result = await buildSiteVerifyResult(origin, shop, gateway, started);
+        if (result.siteWorks) {
+          workingCount++;
+        }
+        results[i] = result;
+
+        // Stream each result live so the UI fills in real time
+        broadcastToUser(req.user!.id, {
+          type: WS_EVENTS.SITE_VERIFY,
+          payload: { ...result, progress: { done: i + 1, total } },
+        });
+
+        broadcastToUser(req.user!.id, {
+          type: WS_EVENTS.LOG,
+          payload: {
+            message: `Site ${i + 1}/${total}: ${result.siteWorks ? '✅ working' : '❌ failed'} (${result.gatewayReply || result.gatewayError || result.siteError || 'no reply'})`,
+            type: result.siteWorks ? 'info' : 'error',
+          },
+        });
       }
-      results.push(result);
+    };
 
-      broadcastToUser(req.user!.id, {
-        type: WS_EVENTS.LOG,
-        payload: {
-          message: `Site ${i + 1}/${total}: ${result.siteWorks ? '✅ working' : '❌ failed'} (${result.gatewayReply || result.gatewayError || result.siteError || 'no reply'})`,
-          type: result.siteWorks ? 'info' : 'error',
-        },
-      });
-    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker()));
 
     res.json({
       results,

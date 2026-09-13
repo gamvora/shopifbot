@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
@@ -8,7 +8,7 @@ import { Card } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import { queryClient } from '@/lib/queryClient';
-import { authFetch } from '@/lib/auth';
+import { authFetch, getAuthToken } from '@/lib/auth';
 import { useAuth } from '@/lib/auth';
 import { useTheme, Theme } from '@/lib/ThemeProvider';
 import { 
@@ -145,9 +145,34 @@ export default function Settings() {
   const [adminSiteName, setAdminSiteName] = useState('');
   const [bulkVerifyResults, setBulkVerifyResults] = useState<SiteVerifyResult[]>([]);
   const [bulkVerifySummary, setBulkVerifySummary] = useState<BulkVerifySummary | null>(null);
+  const [bulkVerifyDone, setBulkVerifyDone] = useState(0);
   const [bulkProxyResults, setBulkProxyResults] = useState<BulkProxyTestItem[] | null>(null);
   const [editingSiteId, setEditingSiteId] = useState<number | null>(null);
   const [editingSiteName, setEditingSiteName] = useState('');
+
+  // Stream bulk site verification results live over WebSocket
+  useEffect(() => {
+    const token = getAuthToken();
+    if (!token) return;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token }));
+    ws.onmessage = (event) => {
+      try {
+        const { type, payload } = JSON.parse(event.data);
+        if (type === 'site_verify' && payload?.url) {
+          setBulkVerifyResults((prev) => [payload, ...prev.filter((r) => r.url !== payload.url)]);
+          if (payload.progress?.done) {
+            setBulkVerifyDone(payload.progress.done);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to parse WS message', e);
+      }
+    };
+    return () => ws.close();
+  }, []);
 
   const { data: sites = [], isLoading: sitesLoading } = useQuery<Site[]>({
     queryKey: ['/api/sites'],
@@ -615,6 +640,7 @@ export default function Settings() {
                     setAdminSiteUrls(e.target.value);
                     setBulkVerifyResults([]);
                     setBulkVerifySummary(null);
+                    setBulkVerifyDone(0);
                   }}
                   disabled={verifyBulkSitesMutation.isPending || addGlobalSiteMutation.isPending || addAllWorkingSitesMutation.isPending}
                   rows={5}
@@ -670,7 +696,7 @@ export default function Settings() {
                   {verifyBulkSitesMutation.isPending && (
                     <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
                       <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
-                      Verifying sites one by one{bulkVerifySummary ? ` (${workingSitesCount} working so far)` : ''}...
+                      Verifying sites (parallel){bulkVerifyDone > 0 ? ` — ${workingSitesCount} working / ${bulkVerifyDone} checked` : ''}...
                     </div>
                   )}
                   {bulkVerifySummary && (

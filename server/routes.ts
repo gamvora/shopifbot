@@ -1079,6 +1079,9 @@ export async function registerRoutes(
         totalCards: cardList?.length || 0,
       });
 
+      // Clear old results so new check starts fresh
+      await storage.clearResults(req.user!.id);
+
       processQueue(cardList || [], targetUrl, proxyList, req.user!.id, req.user!.telegramId, sessionId, siteId).catch(console.error);
 
       res.json(session);

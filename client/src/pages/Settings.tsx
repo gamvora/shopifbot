@@ -105,6 +105,22 @@ interface SiteVerifyResult {
   gatewayStatus: string | null;
   gatewayPrice: string | null;
   elapsed: number;
+  logs?: string[];
+}
+
+interface BulkVerifySummary {
+  total: number;
+  working: number;
+  failed: number;
+  invalid: Array<{ url: string; error: string }>;
+}
+
+interface BulkProxyTestItem {
+  proxy: string;
+  valid: boolean;
+  speed?: number;
+  error?: string;
+  ip1?: string;
 }
 
 import { useCheckerContext } from "@/lib/checker-context";
@@ -125,9 +141,11 @@ export default function Settings() {
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
   const [showThemeDropdown, setShowThemeDropdown] = useState(false);
   const [showFullProxy, setShowFullProxy] = useState<number | null>(null);
-  const [adminSiteUrl, setAdminSiteUrl] = useState('');
+  const [adminSiteUrls, setAdminSiteUrls] = useState('');
   const [adminSiteName, setAdminSiteName] = useState('');
-  const [verifyResult, setVerifyResult] = useState<SiteVerifyResult | null>(null);
+  const [bulkVerifyResults, setBulkVerifyResults] = useState<SiteVerifyResult[]>([]);
+  const [bulkVerifySummary, setBulkVerifySummary] = useState<BulkVerifySummary | null>(null);
+  const [bulkProxyResults, setBulkProxyResults] = useState<BulkProxyTestItem[] | null>(null);
   const [editingSiteId, setEditingSiteId] = useState<number | null>(null);
   const [editingSiteName, setEditingSiteName] = useState('');
 
@@ -260,28 +278,8 @@ export default function Settings() {
     },
   });
 
-  const verifySiteMutation = useMutation<SiteVerifyResult, Error, { url: string }>({
-    mutationFn: async ({ url }) => {
-      const res = await authFetch('/api/admin/sites/verify', {
-        method: 'POST',
-        body: JSON.stringify({ url }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Verification failed');
-      }
-      return res.json();
-    },
-    onSuccess: (data) => {
-      setVerifyResult(data);
-    },
-    onError: (error) => {
-      toast({ title: 'Verification failed', description: error.message, variant: 'destructive' });
-    },
-  });
-
   const addGlobalSiteMutation = useMutation({
-    mutationFn: async ({ url, name, productPrice }: { url: string; name: string; productPrice: string | null }) => {
+    mutationFn: async ({ url, name, productPrice }: { url: string; name?: string; productPrice: string | null }) => {
       const res = await authFetch('/api/admin/sites', {
         method: 'POST',
         body: JSON.stringify({
@@ -298,13 +296,64 @@ export default function Settings() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
-      setAdminSiteUrl('');
-      setAdminSiteName('');
-      setVerifyResult(null);
       toast({ title: 'Global site added for all users', soundType: 'success' });
     },
     onError: (error) => {
       toast({ title: 'Failed to add site', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  const verifyBulkSitesMutation = useMutation<{ results: SiteVerifyResult[]; summary: BulkVerifySummary }, Error, string[]>({
+    mutationFn: async (urls) => {
+      const res = await authFetch('/api/admin/sites/verify-bulk', {
+        method: 'POST',
+        body: JSON.stringify({ urls }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Verification failed');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setBulkVerifyResults(data.results || []);
+      setBulkVerifySummary(data.summary || null);
+      if (data.results?.some((r) => r.ok)) {
+        toast({ title: `${data.summary?.working || 0} sites working`, description: `${data.summary?.failed || 0} failed`, soundType: 'success' });
+      } else {
+        toast({ title: 'No working sites', description: 'All stores failed the check', variant: 'destructive' });
+      }
+    },
+    onError: (error) => {
+      toast({ title: 'Bulk verification failed', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  const addAllWorkingSitesMutation = useMutation({
+    mutationFn: async (results: SiteVerifyResult[]) => {
+      const added = [];
+      for (const r of results) {
+        if (!r.ok) continue;
+        const res = await authFetch('/api/admin/sites', {
+          method: 'POST',
+          body: JSON.stringify({
+            url: r.url,
+            name: adminSiteName.trim() || undefined,
+            productPrice: r.productPrice || undefined,
+          }),
+        });
+        if (res.ok) {
+          added.push(await res.json());
+        }
+      }
+      return added;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sites'] });
+      toast({ title: 'Working sites added for all users', soundType: 'success' });
+    },
+    onError: (error) => {
+      toast({ title: 'Failed to add sites', description: error.message, variant: 'destructive' });
     },
   });
 
@@ -404,32 +453,44 @@ export default function Settings() {
       toast({ title: 'Enter at least one proxy', variant: 'destructive' });
       return;
     }
-
-    if (proxies.length > 0) {
-      toast({ title: 'Only one proxy allowed', description: 'Clear existing proxy first', variant: 'destructive' });
+    if (proxyList.length > 1000) {
+      toast({ title: 'Maximum 1000 proxies allowed', variant: 'destructive' });
       return;
     }
 
-    if (proxyList.length > 1) {
-      toast({ title: 'Only one proxy allowed', variant: 'destructive' });
-      return;
-    }
+    setBulkProxyResults(null);
+    setProxyTestResult(null);
+    setTestingProxy('bulk');
 
-    // Test first proxy before saving
     try {
-      const testResult = await testProxyMutation.mutateAsync(proxyList[0]);
-      if (!testResult.valid) {
-        toast({ 
-          title: 'Proxy not working', 
-          description: 'Test the proxy first and make sure it works',
-          variant: 'destructive' 
-        });
+      const res = await authFetch('/api/proxies/test-bulk', {
+        method: 'POST',
+        body: JSON.stringify({ proxies: proxyList }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Bulk proxy test failed');
+      }
+      const data = await res.json();
+      const results: BulkProxyTestItem[] = data.results || [];
+      setBulkProxyResults(results);
+
+      const valid = results.filter((r) => r.valid).map((r) => r.proxy);
+      const failedCount = results.length - valid.length;
+
+      if (valid.length === 0) {
+        toast({ title: 'No working proxies found', description: 'None of the proxies passed the test', variant: 'destructive' });
         return;
       }
-      // Only add if test passed
-      addProxiesMutation.mutate(proxyList);
-    } catch {
-      toast({ title: 'Proxy test failed', variant: 'destructive' });
+      addProxiesMutation.mutate(valid, {
+        onSuccess: () => {
+          toast({ title: `${valid.length} proxies saved!`, description: failedCount > 0 ? `${failedCount} failed the test` : 'All proxies working', soundType: 'success' });
+        },
+      });
+    } catch (e: any) {
+      toast({ title: 'Proxy test failed', description: e.message, variant: 'destructive' });
+    } finally {
+      setTestingProxy(null);
     }
   };
 
@@ -439,6 +500,8 @@ export default function Settings() {
       testProxyMutation.mutate(proxyList[0]);
     }
   };
+
+  const workingSitesCount = bulkVerifyResults.filter(r => r.ok).length;
 
 
   return (
@@ -539,145 +602,174 @@ export default function Settings() {
                   <Pin className="w-5 h-5 text-white" />
                 </div>
                 <div>
-                  <h2 className="font-bold text-lg">Add Global Site</h2>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">Verify a store then share it with all users</p>
+                  <h2 className="font-bold text-lg">Add Global Sites</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Verify & share up to 1000 stores</p>
                 </div>
               </div>
 
               <div className="space-y-3 mb-4">
-                <Input
-                  placeholder="Store URL — https://store.myshopify.com"
-                  value={adminSiteUrl}
+                <Textarea
+                  placeholder={"Store URLs - one per line (up to 1000)&#10;https://store.myshopify.com"}
+                  value={adminSiteUrls}
                   onChange={(e) => {
-                    setAdminSiteUrl(e.target.value);
-                    setVerifyResult(null);
+                    setAdminSiteUrls(e.target.value);
+                    setBulkVerifyResults([]);
+                    setBulkVerifySummary(null);
                   }}
-                  disabled={verifySiteMutation.isPending || addGlobalSiteMutation.isPending}
+                  disabled={verifyBulkSitesMutation.isPending || addGlobalSiteMutation.isPending || addAllWorkingSitesMutation.isPending}
+                  rows={5}
                   className="rounded-xl bg-white/70 dark:bg-slate-800 border-slate-200 dark:border-slate-700 font-mono text-sm"
-                  data-testid="input-admin-site-url"
+                  data-testid="input-admin-site-urls"
                 />
                 <Input
-                  placeholder="Display name (optional — defaults to domain)"
+                  placeholder="Display name for all sites (optional — defaults to domain)"
                   value={adminSiteName}
                   onChange={(e) => setAdminSiteName(e.target.value)}
-                  disabled={verifySiteMutation.isPending || addGlobalSiteMutation.isPending}
+                  disabled={verifyBulkSitesMutation.isPending || addGlobalSiteMutation.isPending || addAllWorkingSitesMutation.isPending}
                   className="rounded-xl bg-white/70 dark:bg-slate-800 border-slate-200 dark:border-slate-700 font-medium"
                   data-testid="input-admin-site-name"
                 />
                 <Button
-                  onClick={() => verifySiteMutation.mutate({ url: adminSiteUrl })}
-                  disabled={!adminSiteUrl.trim() || verifySiteMutation.isPending || addGlobalSiteMutation.isPending}
+                  onClick={() => {
+                    const urls = adminSiteUrls.split('\n').map(u => u.trim()).filter(Boolean);
+                    if (urls.length === 0) {
+                      toast({ title: 'Enter at least one site URL', variant: 'destructive' });
+                      return;
+                    }
+                    if (urls.length > 1000) {
+                      toast({ title: 'Maximum 1000 sites allowed', variant: 'destructive' });
+                      return;
+                    }
+                    if (stats.active) {
+                      toast({ title: 'Finish current check first', variant: 'destructive' });
+                      return;
+                    }
+                    verifyBulkSitesMutation.mutate(urls);
+                  }}
+                  disabled={!adminSiteUrls.trim() || verifyBulkSitesMutation.isPending || addGlobalSiteMutation.isPending || addAllWorkingSitesMutation.isPending}
                   className="w-full rounded-xl bg-gradient-to-r from-amber-500 to-rose-500 text-white font-semibold shadow-lg shadow-amber-500/20 border-0"
                   size="lg"
-                  data-testid="button-verify-site"
+                  data-testid="button-verify-sites"
                 >
-                  {verifySiteMutation.isPending ? (
+                  {verifyBulkSitesMutation.isPending ? (
                     <>
                       <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                      Verifying store & hitting gateway...
+                      Verifying stores & hitting gateways...
                     </>
                   ) : (
                     <>
                       <Search className="w-5 h-5 mr-2" />
-                      Verify Site
+                      Verify Sites
                     </>
                   )}
                 </Button>
               </div>
 
-              <AnimatePresence>
-                {verifyResult && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="overflow-hidden"
-                  >
-                    <div className={`p-4 rounded-2xl border space-y-3 ${
-                      verifyResult.siteWorks
-                        ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30'
-                        : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/30'
-                    }`}>
-                      <div className="flex items-center gap-2">
-                        {verifyResult.siteWorks ? (
-                          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                        ) : (
-                          <XCircle className="w-5 h-5 text-rose-500" />
-                        )}
-                        <span className={`font-bold ${verifyResult.siteWorks ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
-                          {verifyResult.siteWorks ? 'Store works' : 'Store check failed'}
-                        </span>
-                        <span className="ml-auto text-xs text-muted-foreground">{Math.round(verifyResult.elapsed / 1000)}s</span>
-                      </div>
-
-                      {verifyResult.siteWorks ? (
-                        <div className="space-y-1.5 text-sm">
-                          <div className="flex items-center gap-2 text-muted-foreground">
-                            <Globe className="w-4 h-4 text-blue-500" />
-                            <span>{verifyResult.productTitle}</span>
-                          </div>
-                          {verifyResult.productPrice && (
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-500 font-mono">
-                                {verifyResult.productPrice}
-                              </span>
-                              <span className="text-xs text-muted-foreground">lowest product price</span>
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-rose-600 dark:text-rose-400 flex items-center gap-2">
-                          <AlertCircle className="w-4 h-4" />
-                          {verifyResult.siteError}
-                        </p>
-                      )}
-
-                      <div className="p-3 rounded-xl bg-white/50 dark:bg-slate-800/50 border border-border">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <Activity className="w-4 h-4 text-purple-500" />
-                          <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Gateway Reply</span>
-                          {verifyResult.gateway && (
-                            <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-500 font-mono">
-                              {verifyResult.gateway}
-                            </span>
-                          )}
-                        </div>
-                        {verifyResult.gatewayReply ? (
-                          <p className="text-sm font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                            {verifyResult.gatewayReply}
-                            {verifyResult.gatewayPrice && <span className="ml-2 text-emerald-500/80">{verifyResult.gatewayPrice}</span>}
-                          </p>
-                        ) : (
-                          <p className="text-sm text-rose-600 dark:text-rose-400 font-mono">
-                            {verifyResult.gatewayError || 'No reply (timeout/blocked)'}
-                          </p>
-                        )}
-                      </div>
-
-                      <Button
-                        onClick={() => addGlobalSiteMutation.mutate({
-                          url: adminSiteUrl.trim(),
-                          name: adminSiteName.trim(),
-                          productPrice: verifyResult.productPrice,
-                        })}
-                        disabled={!verifyResult.ok || addGlobalSiteMutation.isPending}
-                        className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold shadow-lg shadow-emerald-500/20 border-0"
-                        size="lg"
-                        data-testid="button-add-global-site"
-                      >
-                        {addGlobalSiteMutation.isPending ? (
-                          <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                        ) : (
-                          <>
-                            <Pin className="w-5 h-5 mr-2" />
-                            Add as Global Site
-                          </>
-                        )}
-                      </Button>
+              {(verifyBulkSitesMutation.isPending || bulkVerifyResults.length > 0) && (
+                <div className="mb-4">
+                  {verifyBulkSitesMutation.isPending && (
+                    <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                      Verifying sites one by one{bulkVerifySummary ? ` (${workingSitesCount} working so far)` : ''}...
                     </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+                  )}
+                  {bulkVerifySummary && (
+                    <div className="p-3 rounded-2xl mb-3 bg-white/60 dark:bg-slate-800/60 border border-amber-200/60 dark:border-amber-500/30 space-y-1 text-sm">
+                      <div className="flex items-center gap-2 font-bold">
+                        <Activity className="w-4 h-4 text-amber-500" />
+                        <span>Verification complete</span>
+                        <span className="ml-auto font-mono text-xs">{bulkVerifySummary.total} checked</span>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-mono">{bulkVerifySummary.working} working</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-600 dark:text-rose-400 font-mono">{bulkVerifySummary.failed} failed</span>
+                        {bulkVerifySummary.invalid.length > 0 && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-500/20 text-slate-600 dark:text-slate-400 font-mono">{bulkVerifySummary.invalid.length} invalid</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {bulkVerifyResults.length > 0 && (
+                    <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
+                      {bulkVerifyResults.map((r, i) => (
+                        <motion.div
+                          key={`${r.url}-${i}`}
+                          initial={{ opacity: 0, x: -10 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          className={`p-3 rounded-2xl border text-sm ${
+                            r.siteWorks
+                              ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30'
+                              : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/30'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            {r.siteWorks ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                            ) : (
+                              <XCircle className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                            )}
+                            <span className="font-mono text-xs truncate flex-1">{r.url}</span>
+                            <span className="text-[10px] text-muted-foreground flex-shrink-0">{Math.round(r.elapsed / 1000)}s</span>
+                          </div>
+                          {r.siteWorks ? (
+                            <>
+                              <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+                                <Globe className="w-3 h-3 text-blue-500" />
+                                <span className="truncate flex-1">{r.productTitle}</span>
+                                {r.productPrice && (
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-500 font-mono text-[10px]">{r.productPrice}</span>
+                                )}
+                              </div>
+                              {r.gatewayReply && (
+                                <p className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400 mb-2">
+                                  {r.gatewayReply}
+                                  {r.gatewayPrice && <span className="ml-2 text-emerald-500/80">{r.gatewayPrice}</span>}
+                                </p>
+                              )}
+                              <Button
+                                onClick={() => addGlobalSiteMutation.mutate({
+                                  url: r.url,
+                                  name: adminSiteName.trim() || undefined,
+                                  productPrice: r.productPrice,
+                                })}
+                                disabled={addGlobalSiteMutation.isPending}
+                                className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold border-0"
+                                size="sm"
+                                data-testid={`button-add-global-site-${i}`}
+                              >
+                                <Pin className="w-4 h-4 mr-1" />
+                                Add as Global Site
+                              </Button>
+                            </>
+                          ) : (
+                            <p className="font-mono text-xs text-rose-600 dark:text-rose-400 text-xs">
+                              {r.gatewayError || r.siteError || 'No reply (timeout/blocked)'}
+                            </p>
+                          )}
+                        </motion.div>
+                      ))}
+                    </div>
+                  )}
+                  {bulkVerifyResults.length > 0 && workingSitesCount > 0 && !verifyBulkSitesMutation.isPending && (
+                    <Button
+                      onClick={() => addAllWorkingSitesMutation.mutate(bulkVerifyResults)}
+                      disabled={addAllWorkingSitesMutation.isPending}
+                      className="w-full mt-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold shadow-lg shadow-emerald-500/20 border-0"
+                      size="lg"
+                      data-testid="button-add-all-working-sites"
+                    >
+                      {addAllWorkingSitesMutation.isPending ? (
+                        <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-5 h-5 mr-2" />
+                          Add All {workingSitesCount} Working Sites
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              )}
             </Card>
           </motion.div>
         )}
@@ -944,7 +1036,7 @@ export default function Settings() {
 
             <Button 
               onClick={handleTestAndSaveProxies}
-              disabled={addProxiesMutation.isPending || testingProxy !== null || !newProxies.trim() || stats.active || proxies.length > 0}
+              disabled={addProxiesMutation.isPending || testingProxy !== null || !newProxies.trim() || stats.active}
               size="lg"
               className="w-full rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 text-white border-0 shadow-lg shadow-indigo-500/20 mb-4"
               data-testid="button-save-proxy"
@@ -952,12 +1044,12 @@ export default function Settings() {
               {testingProxy || addProxiesMutation.isPending ? (
                 <>
                   <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                  {testingProxy ? 'Testing...' : 'Saving...'}
+                  {testingProxy ? 'Testing proxies...' : 'Saving...'}
                 </>
               ) : (
                 <>
                   <Zap className="w-5 h-5 mr-2" />
-                  Test & Save Proxy
+                  Test & Save Proxies
                 </>
               )}
             </Button>
@@ -1045,11 +1137,49 @@ export default function Settings() {
               )}
             </AnimatePresence>
 
+            <AnimatePresence>
+              {bulkProxyResults && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden mb-4"
+                >
+                  <div className="p-4 rounded-2xl border bg-white/60 dark:bg-slate-800/60 border-indigo-200/60 dark:border-indigo-500/30">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Activity className="w-4 h-4 text-indigo-500" />
+                      <span className="font-bold text-sm">Proxy test complete</span>
+                      <span className="ml-auto font-mono text-xs text-muted-foreground">{bulkProxyResults.length} tested</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-mono">
+                        {bulkProxyResults.filter(r => r.valid).length} working
+                      </span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-600 dark:text-rose-400 font-mono">
+                        {bulkProxyResults.filter(r => !r.valid).length} failed
+                      </span>
+                    </div>
+                    {bulkProxyResults.filter(r => !r.valid).length > 0 && (
+                      <div className="max-h-[180px] overflow-y-auto space-y-1 pr-1">
+                        {bulkProxyResults.filter(r => !r.valid).map((r) => (
+                          <div key={r.proxy} className="flex items-center gap-2 text-xs font-mono">
+                            <XCircle className="w-3 h-3 text-rose-500 flex-shrink-0" />
+                            <span className="truncate flex-1">{r.proxy}</span>
+                            <span className="text-[10px] text-muted-foreground flex-shrink-0">{r.error || 'failed'}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {proxies.length > 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="space-y-3"
+                className="space-y-3 max-h-[340px] overflow-y-auto pr-1"
               >
                 {proxies.map((proxy) => (
                   <div 

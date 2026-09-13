@@ -254,6 +254,7 @@ export async function registerRoutes(
         /generic_error/,
         /total_exceeds_limit/,
         /payments_positive_amount_expected/,
+        /delivery/,
       ];
       const isDeclined = !isHardError && DECLINED_RE.some((re) => re.test(apiMsg));
 
@@ -665,7 +666,7 @@ export async function registerRoutes(
 
   const buildSiteVerifyResult = async (origin: string, shop: Awaited<ReturnType<typeof fetchShopDetails>>, gateway: Awaited<ReturnType<typeof testGatewayWithRetries>>, started: number) => {
     // These gateway replies mean the store checkout can't complete properly => site is not usable
-    const NOT_WORKING_REPLIES = [/payments_positive_amount_expected/i, /total_exceeds_limit/i];
+    const NOT_WORKING_REPLIES = [/payments_positive_amount_expected/i, /total_exceeds_limit/i, /delivery/i];
     const isNotWorkingReply = NOT_WORKING_REPLIES.some((re) => re.test(gateway.message || ''));
     const gatewayReplied = gateway.status !== 'error' && !!gateway.message && !isNotWorkingReply && !gateway.message.includes('Timeout') && !gateway.message.includes('[STOPPED]');
     const siteWorks = shop.ok && gatewayReplied;

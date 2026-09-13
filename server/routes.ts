@@ -255,6 +255,7 @@ export async function registerRoutes(
         /total_exceeds_limit/,
         /payments_positive_amount_expected/,
         /payments_credit_card_verification/,
+        /submit_returned/,
         /delivery/,
       ];
       const isDeclined = !isHardError && DECLINED_RE.some((re) => re.test(apiMsg));

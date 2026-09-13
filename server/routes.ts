@@ -5,7 +5,6 @@ import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { WS_EVENTS, ADMIN_TELEGRAM_ID } from "@shared/schema";
 import { selectAPI, buildCheckUrl } from "./api-config";
-const CHECK_API_URL = process.env.CHECK_API_URL || 'https://apicleen-production-d7b1.up.railway.app/api/check';
 import jwt from "jsonwebtoken";
 import { telegramService } from "./services/telegram";
 import { handleBotUpdate, initBot, sendChargedCardNotification } from "./services/telegramBot";
@@ -226,6 +225,8 @@ export async function registerRoutes(
         /service unavailable/,
         /api error/,
         /internal server error/,
+        /ip_rate_limited/,
+        /rate_limited/,
       ];
       const isHardError = !apiMsg || HARD_ERROR_RE.some((re) => re.test(apiMsg));
 
@@ -316,7 +317,7 @@ export async function registerRoutes(
       [allCards[i], allCards[j]] = [allCards[j], allCards[i]];
     }
 
-    const BATCH_SIZE = Math.min(Math.max(Math.ceil(allCards.length / 5), 1), 10);
+    const BATCH_SIZE = Math.min(Math.max(Math.ceil(allCards.length / 5), 1), 20);
 
     broadcastToUser(userId, { type: WS_EVENTS.STATUS_UPDATE, payload: { active: true, processed: 0, total: allCards.length } });
     broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `Starting check on ${targetUrl}...`, type: 'info' } });
@@ -340,7 +341,7 @@ export async function registerRoutes(
         }
 
         if (idx > 0) {
-          const delay = 500 + Math.random() * 1000;
+          const delay = 250 + Math.random() * 500;
           await new Promise(r => setTimeout(r, delay));
         }
 
@@ -360,11 +361,13 @@ export async function registerRoutes(
           return { success: true, stopped: false, charged: false };
         }
 
-        // Process valid card with API - retry up to 4 attempts on any error
+        // Process valid card with API - retry on any error (rate-limited responses max 4x, others up to 40x)
         try {
           const MAX_ATTEMPTS = 40;
+          const RATE_LIMIT_ATTEMPTS = 4;
           let attempt = 0;
           let result: Awaited<ReturnType<typeof checkCardWithAPI>> = { status: 'error', message: 'No attempt made' };
+          let allowedAttempts = MAX_ATTEMPTS;
 
           do {
             attempt++;
@@ -372,15 +375,20 @@ export async function registerRoutes(
             const attemptProxy = proxies[(proxyIndex + attempt - 1) % (proxies.length || 1)] || '';
 
             if (attempt > 1) {
-              broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] Error - retry ${attempt}/${MAX_ATTEMPTS} with new proxy...`, type: 'info' } });
-              await new Promise(r => setTimeout(r, 2000));
+              const isRateLimited = /ip_rate_limited|rate_limited/.test(String(result.message || '').toLowerCase());
+              allowedAttempts = isRateLimited ? RATE_LIMIT_ATTEMPTS : MAX_ATTEMPTS;
+              broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] Error - retry ${attempt}/${allowedAttempts} with new proxy...`, type: 'info' } });
+              await new Promise(r => setTimeout(r, 500));
             }
 
             result = await checkCardWithAPI(cardStr, targetUrl, attemptProxy, (msg) => {
               if (job.shouldStop) return;
               broadcastToUser(userId, { type: WS_EVENTS.LOG, payload: { message: `[${cardStr.substring(0, 6)}] ${msg}`, type: 'info' } });
             }, stopSignal);
-          } while (result.status === 'error' && attempt < MAX_ATTEMPTS && !job.shouldStop);
+
+            const isRateLimited = /ip_rate_limited|rate_limited/.test(String(result.message || '').toLowerCase());
+            allowedAttempts = isRateLimited ? RATE_LIMIT_ATTEMPTS : MAX_ATTEMPTS;
+          } while (result.status === 'error' && attempt < allowedAttempts && !job.shouldStop);
 
           if (job.shouldStop || result?.message?.includes('[STOPPED]')) {
             return { success: false, stopped: true, charged: false };

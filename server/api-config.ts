@@ -2,15 +2,21 @@
  * API Configuration - Check endpoint
  */
 
-// Default API (single working endpoint)
-export const DEFAULT_API = process.env.CHECK_API_URL || 'https://apicleen-production-d7b1.up.railway.app/api/check';
+// All working check endpoints - rotated randomly for speed & load balancing
+export const CHECK_APIS = [
+  'https://apicleen-production-4487.up.railway.app/api/check',
+  'https://apicleen-production-d7b1.up.railway.app/api/check',
+  'https://apicleen-production-1f1e.up.railway.app/api/check',
+  'https://apicleen-production-69aa.up.railway.app/api/check',
+  'https://apicleen-production-0554.up.railway.app/api/check',
+  'https://apicleen-production-07de.up.railway.app/api/check',
+];
 
 /**
- * Select API for card checks
- * A single reliable endpoint is used for both proxy and non-proxy requests.
+ * Select API for card checks - picks a random endpoint each call
  */
 export function selectAPI(_hasProxy?: boolean): string {
-  return DEFAULT_API;
+  return CHECK_APIS[Math.floor(Math.random() * CHECK_APIS.length)];
 }
 
 /**

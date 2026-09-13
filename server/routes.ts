@@ -1018,6 +1018,47 @@ const { name, url } = req.body;
     }
   });
 
+  // Admin: re-check all saved proxies and remove the ones that no longer work
+  app.post('/api/proxies/purge-inactive', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const saved = await storage.getUserProxies(req.user!.id);
+      if (saved.length === 0) {
+        return res.json({ removed: 0, kept: 0, removedProxies: [] });
+      }
+
+      const CONCURRENCY = 20;
+      const validFlags: boolean[] = new Array(saved.length);
+      let nextIndex = 0;
+
+      const worker = async () => {
+        while (nextIndex < saved.length) {
+          const idx = nextIndex++;
+          const r = await checkProxyValidity(saved[idx].proxy, 10000);
+          validFlags[idx] = r.isValid;
+        }
+      };
+
+      const workerCount = Math.min(CONCURRENCY, saved.length);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      const removedProxies: string[] = [];
+      for (let i = saved.length - 1; i >= 0; i--) {
+        if (!validFlags[i]) {
+          await storage.deleteProxy(saved[i].id);
+          removedProxies.push(saved[i].proxy);
+        }
+      }
+
+      res.json({
+        removed: removedProxies.length,
+        kept: saved.length - removedProxies.length,
+        removedProxies,
+      });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.post('/api/proxies/test', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const { proxy } = req.body;

@@ -48,8 +48,20 @@ import {
   Pin,
   Pencil,
   Square,
+  RefreshCw,
 } from 'lucide-react';
 import { Link } from 'wouter';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 
 const themeOptions: { value: Theme; label: string; icon: typeof Sun; color: string }[] = [
   { value: 'light', label: 'Light', icon: Sun, color: 'text-amber-500' },
@@ -149,6 +161,7 @@ export default function Settings() {
   const [bulkVerifySummary, setBulkVerifySummary] = useState<BulkVerifySummary | null>(null);
   const [bulkVerifyDone, setBulkVerifyDone] = useState(0);
   const [bulkProxyResults, setBulkProxyResults] = useState<BulkProxyTestItem[] | null>(null);
+  const [purgeResult, setPurgeResult] = useState<{ removed: number; kept: number; removedProxies: string[] } | null>(null);
   const [editingSiteId, setEditingSiteId] = useState<number | null>(null);
   const [editingSiteName, setEditingSiteName] = useState('');
 
@@ -425,6 +438,37 @@ export default function Settings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/proxies'] });
       toast({ title: 'All proxies cleared', sound: false });
+    },
+  });
+
+  const purgeInactiveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await authFetch('/api/proxies/purge-inactive', { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Proxy cleanup failed');
+      }
+      return res.json();
+    },
+    onSuccess: (data: { removed: number; kept: number; removedProxies: string[] }) => {
+      setPurgeResult(data);
+      queryClient.invalidateQueries({ queryKey: ['/api/proxies'] });
+      if (data.removed > 0) {
+        toast({
+          title: `${data.removed} inactive proxy(es) removed`,
+          description: `${data.kept} still active`,
+          soundType: 'success',
+        });
+      } else {
+        toast({
+          title: 'All proxies are active',
+          description: `${data.kept} proxies checked`,
+          soundType: 'success',
+        });
+      }
+    },
+    onError: (e: any) => {
+      toast({ title: 'Failed to check proxies', description: e?.message, variant: 'destructive' });
     },
   });
 
@@ -1260,6 +1304,90 @@ export default function Settings() {
             </AnimatePresence>
 
             {proxies.length > 0 && (
+              <>
+                <div className="flex gap-2 mb-3">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setPurgeResult(null);
+                      purgeInactiveMutation.mutate();
+                    }}
+                    disabled={purgeInactiveMutation.isPending || deleteProxyMutation.isPending || clearProxiesMutation.isPending || stats.active}
+                    className="flex-1 rounded-xl border-indigo-200 dark:border-indigo-500/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10"
+                    data-testid="button-purge-inactive-proxies"
+                  >
+                    {purgeInactiveMutation.isPending ? (
+                      <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4 mr-1.5" />
+                    )}
+                    Check & Delete Inactive
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={clearProxiesMutation.isPending || purgeInactiveMutation.isPending || deleteProxyMutation.isPending || stats.active}
+                        className="flex-1 rounded-xl border-rose-200 dark:border-rose-500/30 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10"
+                        data-testid="button-delete-all-proxies"
+                      >
+                        {clearProxiesMutation.isPending ? (
+                          <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-4 h-4 mr-1.5" />
+                        )}
+                        Delete All
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete all proxies?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This will remove all {proxies.length} saved proxies. This action cannot be undone.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => clearProxiesMutation.mutate()}
+                          className="bg-rose-500 hover:bg-rose-600 text-white"
+                        >
+                          Delete All
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+
+                <AnimatePresence>
+                  {purgeResult && purgeResult.removed > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden mb-3"
+                    >
+                      <div className="p-3 rounded-2xl border bg-white/60 dark:bg-slate-800/60 border-rose-200/60 dark:border-rose-500/30">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Trash2 className="w-4 h-4 text-rose-500" />
+                          <span className="font-bold text-sm">Removed inactive proxies</span>
+                          <span className="ml-auto font-mono text-xs text-muted-foreground">{purgeResult.removed} removed · {purgeResult.kept} kept</span>
+                        </div>
+                        <div className="max-h-[180px] overflow-y-auto space-y-1 pr-1">
+                          {purgeResult.removedProxies.map((p) => (
+                            <div key={p} className="flex items-center gap-2 text-xs font-mono">
+                              <XCircle className="w-3 h-3 text-rose-500 flex-shrink-0" />
+                              <span className="truncate flex-1">{p}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -1315,6 +1443,7 @@ export default function Settings() {
                   </div>
                 ))}
               </motion.div>
+              </>
             )}
           </Card>
         </motion.div>
